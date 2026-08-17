@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Autoemail — Bulk Draft Creator</title>
+<link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet" />
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e0e0e5;
+    --text: #1a1a1e;
+    --muted: #666;
+    --accent: #3a6ff2;
+    --accent-hover: #2c58d0;
+    --success: #1a8a4a;
+    --error: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181c;
+      --panel: #212227;
+      --border: #34353b;
+      --text: #eaeaec;
+      --muted: #9a9aa2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 2rem 1rem;
+  }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+  h1 { font-size: 1.4rem; margin: 0; }
+  h2 { font-size: 1rem; margin: 0 0 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+  }
+  .accounts-list { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+  .account-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .account-row .label { font-size: 0.9rem; display: flex; align-items: center; }
+  .account-row input[type="checkbox"] { margin-right: 0.6rem; width: 16px; height: 16px; flex: none; }
+  .account-row .provider-badge {
+    font-size: 0.7rem; text-transform: uppercase; padding: 0.1rem 0.4rem;
+    border-radius: 4px; background: var(--border); margin-right: 0.5rem;
+  }
+  .connect-buttons { display: flex; gap: 0.5rem; }
+  a.btn, button {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent); color: white; border: none; border-radius: 8px;
+    padding: 0.55rem 1rem; font-size: 0.9rem; cursor: pointer; text-decoration: none;
+  }
+  a.btn:hover, button:hover { background: var(--accent-hover); }
+  button.secondary, a.btn.secondary {
+    background: transparent; color: var(--error); border: 1px solid var(--border); padding: 0.3rem 0.6rem; font-size: 0.8rem;
+  }
+  button.secondary:hover { background: rgba(192, 57, 43, 0.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; color: var(--muted); }
+  .field { margin-bottom: 1rem; }
+  input[type="text"], select, textarea {
+    width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font-size: 0.95rem; font-family: inherit;
+  }
+  textarea#recipients { min-height: 90px; resize: vertical; }
+  #editor { min-height: 160px; background: var(--bg); color: var(--text); }
+  .ql-toolbar { border-radius: 6px 6px 0 0; }
+  .ql-container { border-radius: 0 0 6px 6px; font-size: 0.95rem; }
+  .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
+  .validation-errors { color: var(--error); font-size: 0.85rem; margin-top: 0.4rem; }
+  #results { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 1rem; }
+  .result-row { font-size: 0.9rem; padding: 0.4rem 0.6rem; border-radius: 6px; }
+  .result-row.success { background: rgba(26, 138, 74, 0.12); color: var(--success); }
+  .result-row.error { background: rgba(192, 57, 43, 0.12); color: var(--error); }
+  .empty-state { color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Autoemail — Bulk Draft Creator</h1>
+
+  <section id="accounts-section">
+    <h2>Connected Accounts</h2>
+    <div id="accounts-list" class="accounts-list"></div>
+    <div id="account-errors" class="validation-errors"></div>
+    <div class="connect-buttons">
+      <a class="btn" href="/oauth/google/connect">Connect Google Account</a>
+      <a class="btn" href="/oauth/microsoft/connect">Connect Microsoft Account</a>
+    </div>
+  </section>
+
+  <section id="form-section">
+    <h2>Create Drafts</h2>
+    <div class="hint" style="margin-bottom: 1rem;">Recipients are split round-robin across the checked accounts above.</div>
+    <form id="draft-form">
+      <div class="field">
+        <label for="subject">Subject</label>
+        <input type="text" id="subject" required />
+      </div>
+      <div class="field">
+        <label for="editor-label">Mail</label>
+        <div id="editor"></div>
+      </div>
+      <div class="field">
+        <label for="recipients">Sender list (recipients)</label>
+        <textarea id="recipients" placeholder="one@example.com, two@example.com&#10;three@example.com" required></textarea>
+        <div class="hint">One address per line, or comma-separated — both work.</div>
+        <div id="recipient-errors" class="validation-errors"></div>
+      </div>
+      <button type="submit" id="submit-btn">Create Drafts</button>
+    </form>
+    <div id="results"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
