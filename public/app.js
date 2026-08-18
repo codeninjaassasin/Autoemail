@@ -207,8 +207,9 @@ function renderResearchResults(results) {
     // Summary row
     const row = document.createElement('div');
     row.className = `result-row ${item.success ? 'success' : 'error'}`;
+    const found = [...(item.contacts?.emails ?? []), ...(item.contacts?.phones ?? [])];
     row.textContent = item.success
-      ? `✓ [${item.area}] ${item.name ?? '(untitled)'} — email: ${item.contacts?.email ?? 'N/A'}`
+      ? `${found.length ? '✓' : '·'} [${item.area}] ${item.name ?? '(untitled)'} — ${found.length ? found.join(', ') : 'no contact in ad text'}`
       : `✗ ${item.url ?? item.area ?? '?'} — ${item.error}`;
     researchResultsEl.appendChild(row);
 
@@ -216,15 +217,16 @@ function renderResearchResults(results) {
     const card = document.createElement('div');
     card.className = 'modal-card';
     if (item.success) {
-      const { email = '—', call = '—', message = '—' } = item.contacts ?? {};
+      const emails = item.contacts?.emails ?? [];
+      const phones = item.contacts?.phones ?? [];
       card.innerHTML = `
         <h4>${escapeHtml(item.name ?? '(untitled)')}</h4>
         <div class="modal-meta">
           <strong>Area:</strong> ${escapeHtml(item.area || '—')}<br>
-          <strong>URL:</strong> <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.url)}</a><br>
-          <strong>Email:</strong> ${escapeHtml(email)}<br>
-          <strong>Call:</strong> ${escapeHtml(call)}<br>
-          <strong>Message:</strong> ${escapeHtml(message)}
+          <strong>URL:</strong> <a href="${safeUrl(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.url)}</a><br>
+          <strong>Email:</strong> ${emails.length ? escapeHtml(emails.join(', ')) : '—'}<br>
+          <strong>Phone:</strong> ${phones.length ? escapeHtml(phones.join(', ')) : '—'}<br>
+          ${item.contactNote ? `<em>${escapeHtml(item.contactNote)}</em>` : ''}
         </div>`;
     } else {
       card.innerHTML = `
@@ -249,6 +251,17 @@ function escapeHtml(value = '') {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// Scraped hrefs are third-party data — escaping alone wouldn't stop a
+// `javascript:` URL, so only let http(s) through.
+function safeUrl(value) {
+  try {
+    const u = new URL(String(value));
+    return u.protocol === 'http:' || u.protocol === 'https:' ? escapeHtml(u.href) : '#';
+  } catch {
+    return '#';
+  }
 }
 
 function openResearchModal() {
