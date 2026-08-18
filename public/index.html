@@ -90,6 +90,86 @@
   .result-row.success { background: rgba(26, 138, 74, 0.12); color: var(--success); }
   .result-row.error { background: rgba(192, 57, 43, 0.12); color: var(--error); }
   .empty-state { color: var(--muted); font-size: 0.9rem; }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    z-index: 1000;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    width: min(900px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+    padding: 1rem;
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  .modal-header h3 { margin: 0; font-size: 1rem; }
+  .modal-close {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 0.35rem 0.7rem;
+  }
+  .modal-results { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.9rem;
+    background: var(--bg);
+  }
+  .modal-card h4 { margin: 0 0 0.45rem; font-size: 0.95rem; }
+  .modal-meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; word-break: break-all; }
+  .modal-body {
+    white-space: pre-wrap;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    max-height: 240px;
+    overflow: auto;
+  }
+.tag-container {
+    display: flex; flex-wrap: wrap; gap: 0.4rem;
+    min-height: 2rem; margin-bottom: 0.5rem;
+  }
+  .area-tag {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    background: var(--accent); color: #fff;
+    font-size: 0.8rem; padding: 0.2rem 0.5rem;
+    border-radius: 999px;
+  }
+  .area-tag button {
+    background: none; border: none; color: #fff;
+    font-size: 1rem; line-height: 1; cursor: pointer;
+    padding: 0; margin: 0;
+  }
+  .area-input-row { display: flex; gap: 0.5rem; align-items: flex-start; }
+  .area-input-row input {
+    flex: 0 0 240px; padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font-size: 0.9rem;
+  }
+  .area-input-row .tag-container {
+    flex: 1; margin-bottom: 0; min-height: 2.2rem;
+  }
+  #research-modal { display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5); z-index: 100; overflow-y: auto; padding: 2rem 1rem; }
+  #research-modal.open { display: block; }
+  .modal-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; font-size: 0.875rem; }
+  .modal-meta { color: var(--muted); margin-top: 0.4rem; line-height: 1.7; }
 </style>
 </head>
 <body>
@@ -128,7 +208,89 @@
     </form>
     <div id="results"></div>
   </section>
+
+  <section>
+  <h2>Craigslist Contact Scraper</h2>
+
+  <!-- Area tag input -->
+  <label style="font-size:0.875rem;color:var(--muted);display:block;margin-bottom:0.4rem;">
+    Areas — type a subdomain code and press Enter or click Add
+  </label>
+  <div id="area-tags" class="tag-container"></div>
+  <div class="area-input-row">
+    <input
+      id="area-input"
+      list="area-suggestions"
+      placeholder="e.g. sfbay, newyork, chicago…"
+      autocomplete="off"
+    />
+    <datalist id="area-suggestions">
+      <option value="sfbay"></option>
+      <option value="losangeles"></option>
+      <option value="newyork"></option>
+      <option value="chicago"></option>
+      <option value="seattle"></option>
+      <option value="boston"></option>
+      <option value="denver"></option>
+      <option value="atlanta"></option>
+      <option value="miami"></option>
+      <option value="dallas"></option>
+      <option value="houston"></option>
+      <option value="phoenix"></option>
+      <option value="portland"></option>
+      <option value="sandiego"></option>
+      <option value="sacramento"></option>
+      <option value="minneapolis"></option>
+      <option value="philadelphia"></option>
+      <option value="austin"></option>
+      <option value="lasvegas"></option>
+      <option value="raleigh"></option>
+      <option value="nashville"></option>
+      <option value="detroit"></option>
+      <option value="cleveland"></option>
+      <option value="pittsburgh"></option>
+    </datalist>
+    <button type="button" id="area-add-btn" class="secondary">Add</button>
+    <div id="area-tags" class="tag-container"></div>
+  </div>
+
+  <!-- Category -->
+  <label style="font-size:0.875rem;color:var(--muted);display:block;margin:0.75rem 0 0.3rem;">
+    Category
+  </label>
+  <select id="area-category" style="padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.9rem;">
+    <option value="jjj">Jobs</option>
+    <option value="ggg">Gigs</option>
+    <option value="sss">For Sale — General</option>
+    <option value="cto">Cars by Owner</option>
+    <option value="hhh">Housing</option>
+    <option value="lbr">Labor / Moving</option>
+  </select>
+
+  <div style="margin-top:0.75rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+    <button id="research-submit-btn" type="button">Start Scraping</button>
+    <span style="font-size:0.8rem;color:var(--muted);">
+      Launches browser, browses each area's listings, and extracts contact info.
+    </span>
+  </div>
+
+  <div id="research-errors" style="color:var(--error);font-size:0.875rem;margin-top:0.5rem;"></div>
+  <div id="research-results" style="margin-top:0.75rem;display:flex;flex-direction:column;gap:0.4rem;"></div>
+</section>
 </main>
+
+
+
+<!-- Results modal -->
+<div id="research-modal" aria-hidden="true">
+  <div style="background:var(--panel);border-radius:10px;max-width:640px;margin:0 auto;padding:1.5rem;position:relative;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+      <strong>Scraped Contacts</strong>
+      <button id="research-modal-close" type="button" class="secondary">Close</button>
+    </div>
+    <div id="research-modal-body" style="display:flex;flex-direction:column;gap:1rem;"></div>
+  </div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
 <script src="/app.js"></script>
