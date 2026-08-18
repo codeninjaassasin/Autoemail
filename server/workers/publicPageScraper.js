@@ -112,7 +112,12 @@ function extractContacts(body) {
 async function readReplyPanel(page, area) {
   const out = { emails: [], phones: [], challenged: false };
   const replyBtn = await page.$(REPLY_BTN);
-  if (!replyBtn) return out;
+  if (!replyBtn) {
+    // Silent here would be indistinguishable from "poster published nothing",
+    // and this is also how a markup change would first show up.
+    console.log(`   [${area}] No reply button on this post.`);
+    return out;
+  }
 
   // Craigslist escalates to hCaptcha once it decides a client is automated;
   // /init then carries a siteKey and the panel never fills. Detect that so
@@ -129,6 +134,11 @@ async function readReplyPanel(page, area) {
     await replyBtn.click();
     await page.waitForSelector(REPLY_OPTION, { timeout: 10000 });
   } catch {
+    // The /init sniff above has to await the response body, which can resolve
+    // after this 10s wait has already given up — so a real challenge shows up
+    // as "panel didn't open". The DOM is authoritative right now, so ask it
+    // before deciding what happened.
+    if (!out.challenged) out.challenged = await looksChallenged(page);
     console.log(
       out.challenged
         ? `   [${area}] Craigslist served a CAPTCHA — contact details withheld.`
