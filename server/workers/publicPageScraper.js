@@ -21,6 +21,15 @@ const REPLY_CONTENT     = '.reply-content';
 // HTTP request and will otherwise outlive any client timeout.
 const MAX_POSTS_PER_AREA = 25;
 
+// Craigslist pins its CAPTCHA to the browser session, so dropping the whole
+// session and relaunching usually clears it. Cap the restarts: if the
+// challenge follows us into a clean session the block is on the IP, and
+// relaunching forever just stalls the run.
+const MAX_SESSION_RESTARTS = 3;
+// Relaunching instantly lands straight back on the rate limit that triggered
+// the challenge, so let the old session go cold first.
+const SESSION_COOLDOWN_MS = Number(process.env.CAPTCHA_COOLDOWN_MS ?? 15000);
+
 const AREA_RE     = /^[a-z0-9-]+$/;
 const CATEGORY_RE = /^[a-z0-9]+$/;
 
@@ -217,13 +226,53 @@ async function processSinglePost(postUrl, page, area) {
   };
 }
 
-async function scrapeAreas(areas = [], category = 'jjj') {
+function launchBrowser() {
   // Visible by default so you can watch it work; set HEADLESS=1 to suppress.
-  const browser = await chromium.launch({ headless: process.env.HEADLESS === '1' });
+  return chromium.launch({ headless: process.env.HEADLESS === '1' });
+}
+
+/**
+ * Drops the flagged Chrome session and returns a fresh one. The new browser
+ * starts with empty cookies and storage, which is what actually sheds the
+ * CAPTCHA — reusing the old profile carries the flag straight over.
+ */
+async function restartSession(browser, area, attempt) {
+  console.log(
+    `   [${area}] CAPTCHA hit — restarting Chrome ` +
+      `(restart ${attempt}/${MAX_SESSION_RESTARTS}) after a ` +
+      `${Math.round(SESSION_COOLDOWN_MS / 1000)}s cooldown.`
+  );
+  // A browser that already crashed will reject here; we're discarding it
+  // either way.
+  await browser.close().catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, SESSION_COOLDOWN_MS));
+  return launchBrowser();
+}
+
+/** Runs one post on its own page, turning any failure into a result row. */
+async function runPost(browser, url, area) {
+  const page = await browser.newPage();
+  try {
+    const result = await processSinglePost(url, page, area);
+    return result ?? { url, area, success: false, error: 'No reply button or modal' };
+  } catch (err) {
+    console.error(`[${area}] Post failed: ${url}`, err.message);
+    return { url, area, success: false, error: err.message };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+async function scrapeAreas(areas = [], category = 'jjj') {
+  let browser = await launchBrowser();
   const results = [];
+  let restarts = 0;
+  let warnedExhausted = false;
 
   try {
-    for (const area of areas) {
+    for (let a = 0; a < areas.length; a += 1) {
+      const area = areas[a];
+
       // Step 1: collect post URLs for this area
       let postUrls = [];
       try {
@@ -242,21 +291,39 @@ async function scrapeAreas(areas = [], category = 'jjj') {
       }
 
       // Step 2: process each post
-      for (const url of postUrls) {
-        const page = await browser.newPage();
-        try {
-          const result = await processSinglePost(url, page, area);
-          results.push(result ?? { url, area, success: false, error: 'No reply button or modal' });
-        } catch (err) {
-          console.error(`[${area}] Post failed: ${url}`, err.message);
-          results.push({ url, area, success: false, error: err.message });
-        } finally {
-          await page.close();
+      for (let i = 0; i < postUrls.length; i += 1) {
+        const url = postUrls[i];
+        let result = await runPost(browser, url, area);
+
+        // Only worth relaunching while posts remain — either later in this
+        // area or in one we haven't started. A CAPTCHA on the very last post
+        // has nothing left to protect.
+        const postsRemain = i < postUrls.length - 1 || a < areas.length - 1;
+
+        if (result.captchaBlocked && postsRemain) {
+          if (restarts < MAX_SESSION_RESTARTS) {
+            restarts += 1;
+            browser = await restartSession(browser, area, restarts);
+            // Retry the blocked post on the clean session — otherwise its
+            // contact details stay lost even though the restart cleared the
+            // block for everything after it. Keep the original row if the
+            // retry is challenged too, so the CAPTCHA stays reported.
+            const retry = await runPost(browser, url, area);
+            if (!retry.captchaBlocked) result = retry;
+          } else if (!warnedExhausted) {
+            warnedExhausted = true;
+            console.log(
+              `   [${area}] CAPTCHA persists after ${MAX_SESSION_RESTARTS} restarts — ` +
+                'the block is on the IP, not the session. Continuing without reply details.'
+            );
+          }
         }
+
+        results.push(result);
       }
     }
   } finally {
-    await browser.close();
+    await browser.close().catch(() => {});
   }
 
   return results;
