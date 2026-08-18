@@ -14,7 +14,29 @@ const BODY_SELECTOR     = 'section#postingbody';
 const REPLY_OPTION      = 'button.reply-option-header';
 const REPLY_EMAIL_LINK  = '.reply-email-address a[href^="mailto:"]';
 const REPLY_CONTENT     = '.reply-content';
+// The search page has no /init call to inspect, so a challenge there is
+// spotted from the markup the challenge widget leaves behind.
+const CAPTCHA_MARKERS   = [
+  'iframe[src*="hcaptcha"]',
+  'iframe[src*="recaptcha"]',
+  'script[src*="hcaptcha"]',
+  '.h-captcha',
+  '#px-captcha',
+];
 // ─────────────────────────────────────────────────────────────────
+
+// Deliberately narrow: an area with genuinely zero listings must not read as
+// a challenge, or we'd relaunch the browser over an empty category.
+const CAPTCHA_TEXT_RE = /(?:are you a human|verify you(?:'re| are) (?:a )?human|unusual traffic|access denied|blocked)/i;
+
+/** True if the page currently shows a bot challenge rather than content. */
+async function looksChallenged(page) {
+  for (const sel of CAPTCHA_MARKERS) {
+    if (await page.$(sel).catch(() => null)) return true;
+  }
+  const text = await page.innerText('body').catch(() => '');
+  return CAPTCHA_TEXT_RE.test(text);
+}
 
 // A single search page serves ~300 results and each post costs several
 // seconds, so cap the work per area — the whole scrape runs inside one
@@ -162,15 +184,22 @@ async function getPostUrls(area, category, browser) {
       `[${area}] Found ${urls.length} posts` +
         (urls.length > capped.length ? `, processing first ${capped.length}.` : '.')
     );
-    return capped;
+    return { urls: capped, challenged: false };
   } catch (err) {
     if (err.name === 'TimeoutError') {
+      // The results list never appearing means either an empty category or a
+      // challenge standing in front of it — those need opposite responses, so
+      // check before reporting.
+      if (await looksChallenged(page)) {
+        console.log(`[${area}] Search page served a CAPTCHA instead of results.`);
+        return { urls: [], challenged: true };
+      }
       console.log(`[${area}] No results on ${listingUrl}`);
-      return [];
+      return { urls: [], challenged: false };
     }
     throw err;
   } finally {
-    await page.close();
+    await page.close().catch(() => {});
   }
 }
 
@@ -274,14 +303,37 @@ async function scrapeAreas(areas = [], category = 'jjj') {
       const area = areas[a];
 
       // Step 1: collect post URLs for this area
-      let postUrls = [];
+      let listing;
       try {
-        postUrls = await getPostUrls(area, category, browser);
+        listing = await getPostUrls(area, category, browser);
+
+        // A challenge here costs us the whole area, so it's always worth a
+        // fresh session — unlike a blocked post, there is by definition work
+        // still pending. Retry the listing once on the clean browser.
+        if (listing.challenged && restarts < MAX_SESSION_RESTARTS) {
+          restarts += 1;
+          browser = await restartSession(browser, area, restarts);
+          listing = await getPostUrls(area, category, browser);
+        }
       } catch (err) {
         console.error(`[${area}] Listing page failed:`, err.message);
         results.push({ area, success: false, error: `Could not load listing page: ${err.message}` });
         continue;
       }
+
+      if (listing.challenged) {
+        // Distinct from "no listings": the area may well have posts, we just
+        // can't see them. Saying so keeps it from reading as an empty area.
+        results.push({
+          area,
+          success: false,
+          captchaBlocked: true,
+          error: 'Craigslist served a CAPTCHA on the search page, so no listings could be read.',
+        });
+        continue;
+      }
+
+      const postUrls = listing.urls;
 
       if (postUrls.length === 0) {
         // Without this the area contributes no rows at all and the UI shows
@@ -329,4 +381,4 @@ async function scrapeAreas(areas = [], category = 'jjj') {
   return results;
 }
 
-module.exports = { scrapeAreas, processSinglePost };
+module.exports = { scrapeAreas, processSinglePost, getPostUrls, looksChallenged };
