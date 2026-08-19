@@ -60,6 +60,7 @@ const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
 // is no longer rotation.
 const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 8);
 const MIN_POOL_SIZE = Number(process.env.PROXY_POOL_MIN ?? 3);
+const TOP_UP_BACKOFF_POSTS = Number(process.env.PROXY_TOPUP_BACKOFF ?? 5);
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -396,7 +397,19 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
       }
       continue;
     }
-    if (result.captchaBlocked) continue; // a different IP may not be challenged
+    if (result.captchaBlocked) {
+      // Craigslist blocks the address, not the request, so a challenged proxy
+      // will keep being challenged. Strike it, and once it's burned it leaves
+      // the pool — otherwise it gets handed to post after post, which looks
+      // like rotation while changing nothing.
+      if (session.exit.server && proxyPool.markChallenged(session.exit.server)) {
+        console.log(
+          `   [proxy] Burned ${session.exit.ip} — challenged repeatedly, ` +
+            `dropped from the pool (${proxyPool.size()} left).`
+        );
+      }
+      continue; // a different IP may not be challenged
+    }
 
     return result; // clean
   }
@@ -460,6 +473,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   const results = [];
   const sessionsUsed = [];
   const noteSession = (e) => sessionsUsed.push({ ...e, at: new Date().toISOString() });
+  let topUpCooldown = 0;
 
   for (const area of areas) {
     // Step 1: collect post URLs. The listing gets the same rotation treatment
@@ -519,11 +533,22 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
 
     for (let i = 0; i < listing.urls.length; i += 1) {
       // Top the pool back up when deaths have thinned it, so a long run keeps
-      // rotating instead of settling onto the last survivor.
-      if (process.env.USE_PROXY !== '0' && proxyPool.size() < MIN_POOL_SIZE) {
-        console.log(`   [proxy] Pool down to ${proxyPool.size()} — topping up.`);
+      // rotating instead of settling onto the last survivor. Backoff matters:
+      // a top-up that finds nothing costs a full probe sweep, and repeating
+      // that on every post would dominate the run.
+      if (process.env.USE_PROXY !== '0' && proxyPool.size() < MIN_POOL_SIZE && topUpCooldown <= 0) {
+        const before = proxyPool.size();
+        console.log(`   [proxy] Pool down to ${before} — topping up.`);
         await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
+        const gained = proxyPool.size() - before;
+        if (gained <= 0) {
+          topUpCooldown = TOP_UP_BACKOFF_POSTS;
+          console.log(
+            `   [proxy] No replacements found — not retrying for ${TOP_UP_BACKOFF_POSTS} posts.`
+          );
+        }
       }
+      if (topUpCooldown > 0) topUpCooldown -= 1;
 
       const result = await scrapePostWithRotation(
         listing.urls[i],

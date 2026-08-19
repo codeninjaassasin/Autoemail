@@ -282,7 +282,28 @@ function next() {
 function markDead(server) {
   const before = verified.length;
   verified = verified.filter((p) => p.server !== server);
+  strikes.delete(server);
   return before !== verified.length;
+}
+
+// A proxy Craigslist has challenged will almost certainly be challenged again
+// — the block is on the address. Leaving it in the pool means handing it to
+// post after post, which looks like rotation while changing nothing.
+const BURN_LIMIT = Number(process.env.PROXY_BURN_LIMIT ?? 2);
+const strikes = new Map();
+
+/**
+ * Records a CAPTCHA against a proxy. Returns true once it has been challenged
+ * enough times to be considered burned, at which point it leaves the pool.
+ */
+function markChallenged(server) {
+  const n = (strikes.get(server) ?? 0) + 1;
+  strikes.set(server, n);
+  if (n >= BURN_LIMIT) {
+    markDead(server);
+    return true;
+  }
+  return false;
 }
 
 /** How many verified proxies are currently available. */
@@ -369,4 +390,4 @@ async function directIdentity() {
   }
 }
 
-module.exports = { warmPool, next, markDead, size, nextWorking, directIdentity, validate, fetchList };
+module.exports = { warmPool, next, markDead, markChallenged, size, nextWorking, directIdentity, validate, fetchList };
