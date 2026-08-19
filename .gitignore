@@ -5,3 +5,11 @@ node_modules/
 *.env
 data/
 .playwright-mcp/
+
+# WireGuard/OpenVPN configs carry a PrivateKey that grants access to the
+# account. Both spellings — macOS is case-insensitive, so the directory can be
+# committed under either.
+proxies/
+Proxies/
+*.conf
+*.ovpn

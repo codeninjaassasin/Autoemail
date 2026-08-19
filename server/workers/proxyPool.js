@@ -358,7 +358,34 @@ async function geoOf(ip) {
  * Returns a report even when it finds nothing; callers surface that rather
  * than treating an empty pool as an error.
  */
+let warmInFlight = null;
+
+/**
+ * Serialises warming. The preflight, the background top-up and the per-post
+ * refill all call this, and letting two sweeps run at once would have them
+ * walking the same cursor and double-probing the same candidates.
+ */
 async function warmPool(target = 4, log = () => {}) {
+  if (warmInFlight) await warmInFlight.catch(() => {});
+  if (verified.length >= target) {
+    return {
+      checked: 0,
+      working: verified.length,
+      target,
+      proxies: verified.map((p) => ({ server: p.server, ip: p.ip, location: p.location, org: p.org, ipVerified: p.ipVerified })),
+      listSize: cachedList.length,
+      error: null,
+    };
+  }
+  warmInFlight = warmPoolUncoordinated(target, log);
+  try {
+    return await warmInFlight;
+  } finally {
+    warmInFlight = null;
+  }
+}
+
+async function warmPoolUncoordinated(target, log) {
   const report = { checked: 0, working: 0, target, proxies: [], listSize: 0, error: null };
 
   let list;

@@ -111,6 +111,7 @@ const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
 // otherwise a long run ends up cycling the last one or two survivors, which
 // is no longer rotation.
 const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 8);
+const POOL_READY = Number(process.env.PROXY_POOL_READY ?? 3);
 const MIN_POOL_SIZE = Number(process.env.PROXY_POOL_MIN ?? 3);
 const TOP_UP_BACKOFF_POSTS = Number(process.env.PROXY_TOPUP_BACKOFF ?? 5);
 
@@ -535,8 +536,13 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   if (process.env.USE_PROXY !== '0') {
     console.log('── Checking proxies before scraping ──');
     const t0 = Date.now();
-    proxyCheck = await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
+    // Only enough to start. Probing all the way to POOL_TARGET was the single
+    // largest remaining cost in a run, and the scrape doesn't need a full pool
+    // on the first post — it needs one working proxy and more arriving.
+    proxyCheck = await proxyPool.warmPool(POOL_READY, (m) => console.log(`   [proxy] ${m}`));
     proxyCheck.elapsedMs = Date.now() - t0;
+    proxyCheck.ready = POOL_READY;
+    proxyCheck.target = POOL_TARGET;
 
     if (proxyCheck.working === 0) {
       console.log(
@@ -554,6 +560,16 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   // Hand the report back before the slow part begins, so a caller can show it
   // without waiting for the scrape.
   opts.onPreflight?.(proxyCheck);
+
+  // Keep filling to the full target while the scrape runs. Deliberately not
+  // awaited — the point is that posts start now — and failures are swallowed
+  // because a background top-up that finds nothing must not sink the run.
+  if (process.env.USE_PROXY !== '0' && proxyPool.size() < POOL_TARGET) {
+    proxyPool
+      .warmPool(POOL_TARGET, (m) => console.log(`   [proxy·bg] ${m}`))
+      .then(() => console.log(`   [proxy·bg] Pool now ${proxyPool.size()}.`))
+      .catch(() => {});
+  }
 
   const results = [];
   const sessionsUsed = [];
