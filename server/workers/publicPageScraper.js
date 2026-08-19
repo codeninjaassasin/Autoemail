@@ -56,6 +56,15 @@ function paceDelay() {
   return lo + Math.floor(Math.random() * (hi - lo + 1));
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Each post runs on its own proxy and browser, so overlapping them raises
+// throughput without raising the rate any single address presents.
+const POST_CONCURRENCY = Number(process.env.POST_CONCURRENCY ?? 4);
+// The reply panel is CAPTCHA-gated for automated clients, so this bounds a
+// wait that usually ends in a challenge rather than a panel.
+const REPLY_PANEL_TIMEOUT_MS = Number(process.env.REPLY_PANEL_TIMEOUT_MS ?? 6000);
+
 // Playwright's Chromium announces itself: navigator.webdriver is true, the
 // automation switch is on, and several APIs are missing or stubbed. Craigslist
 // reads those, so a rotated IP alone doesn't help if the browser still says
@@ -200,17 +209,26 @@ async function readReplyPanel(page, area) {
 
   try {
     await replyBtn.click();
-    await page.waitForSelector(REPLY_OPTION, { timeout: 10000 });
+    // Race the panel against the challenge widget instead of waiting out the
+    // full timeout. Craigslist gates this panel behind hCaptcha for automated
+    // clients, so the overwhelmingly common outcome is a challenge that shows
+    // up in a second or two — waiting ten more for a panel that isn't coming
+    // was the single largest cost in a run.
+    const outcome = await Promise.race([
+      page.waitForSelector(REPLY_OPTION, { timeout: REPLY_PANEL_TIMEOUT_MS }).then(() => 'panel', () => 'gone'),
+      page.waitForSelector(CAPTCHA_MARKERS.join(','), { timeout: REPLY_PANEL_TIMEOUT_MS }).then(() => 'captcha', () => 'gone'),
+    ]);
+    if (outcome !== 'panel') {
+      if (outcome === 'captcha') out.challenged = true;
+      throw new Error('reply panel unavailable');
+    }
   } catch {
     // The /init sniff above has to await the response body, which can resolve
     // after this 10s wait has already given up — so a real challenge shows up
     // as "panel didn't open". The DOM is authoritative, but the challenge
     // widget is injected a beat after the panel fails, so give it a moment to
     // appear rather than asking too early and recording the wrong cause.
-    if (!out.challenged) {
-      await page.waitForTimeout(2500).catch(() => {});
-      out.challenged = await looksChallenged(page);
-    }
+    if (!out.challenged) out.challenged = await looksChallenged(page);
     console.log(
       out.challenged
         ? `   [${area}] Craigslist served a CAPTCHA — contact details withheld.`
@@ -540,7 +558,34 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   const results = [];
   const sessionsUsed = [];
   const noteSession = (e) => sessionsUsed.push({ ...e, at: new Date().toISOString() });
+
   let topUpCooldown = 0;
+  let topUpInFlight = null;
+
+  /**
+   * Refills the pool once deaths have thinned it. Concurrent workers all hit
+   * this, so the sweep is shared rather than run once per worker; a top-up
+   * that finds nothing costs a full probe pass and backs off afterwards.
+   */
+  async function topUpPoolIfThin() {
+    if (process.env.USE_PROXY === '0') return;
+    if (proxyPool.size() >= MIN_POOL_SIZE) return;
+    if (topUpCooldown > 0) { topUpCooldown -= 1; return; }
+    if (topUpInFlight) return topUpInFlight;
+
+    const before = proxyPool.size();
+    console.log(`   [proxy] Pool down to ${before} — topping up.`);
+    topUpInFlight = proxyPool
+      .warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`))
+      .then(() => {
+        if (proxyPool.size() - before <= 0) {
+          topUpCooldown = TOP_UP_BACKOFF_POSTS;
+          console.log(`   [proxy] No replacements found — pausing top-ups for ${TOP_UP_BACKOFF_POSTS} posts.`);
+        }
+      })
+      .finally(() => { topUpInFlight = null; });
+    return topUpInFlight;
+  }
 
   for (const area of areas) {
     // Step 1: collect post URLs. The listing gets the same rotation treatment
@@ -603,42 +648,40 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
         `(${proxyPool.size()} in the pool).`
     );
 
-    for (let i = 0; i < listing.urls.length; i += 1) {
-      // Top the pool back up when deaths have thinned it, so a long run keeps
-      // rotating instead of settling onto the last survivor. Backoff matters:
-      // a top-up that finds nothing costs a full probe sweep, and repeating
-      // that on every post would dominate the run.
-      if (process.env.USE_PROXY !== '0' && proxyPool.size() < MIN_POOL_SIZE && topUpCooldown <= 0) {
-        const before = proxyPool.size();
-        console.log(`   [proxy] Pool down to ${before} — topping up.`);
-        await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
-        const gained = proxyPool.size() - before;
-        if (gained <= 0) {
-          topUpCooldown = TOP_UP_BACKOFF_POSTS;
-          console.log(
-            `   [proxy] No replacements found — not retrying for ${TOP_UP_BACKOFF_POSTS} posts.`
-          );
-        }
-      }
-      if (topUpCooldown > 0) topUpCooldown -= 1;
+    // Posts run concurrently. Each already carries its own proxy and browser,
+    // so overlapping them doesn't raise the request rate seen by any single
+    // address — which is what pacing exists to control. Sequential execution
+    // was leaving nearly all the wall-clock idle waiting on slow proxies.
+    const urls = listing.urls;
+    const rows = new Array(urls.length);
+    let cursor = 0;
+    let done = 0;
 
-      const result = await scrapePostWithRotation(
-        listing.urls[i],
-        area,
-        ATTEMPTS_PER_POST,
-        noteSession
-      );
-      results.push(result);
-      console.log(`   [${area}] ${i + 1}/${listing.urls.length} done.`);
+    async function worker(slot) {
+      // Stagger the openings so the workers don't all hit Craigslist on the
+      // same instant, which would undo the pacing.
+      await sleep(slot * (paceDelay() / POST_CONCURRENCY));
 
-      // Pace only between posts — no reason to wait after the last one.
-      const more = i < listing.urls.length - 1;
-      if (more && PACE_MAX_MS > 0) {
-        const wait = paceDelay();
-        console.log(`   [${area}] Waiting ${(wait / 1000).toFixed(1)}s before the next post.`);
-        await new Promise((r) => setTimeout(r, wait));
+      while (true) {
+        const i = cursor;
+        cursor += 1;
+        if (i >= urls.length) return;
+
+        await topUpPoolIfThin();
+        rows[i] = await scrapePostWithRotation(urls[i], area, ATTEMPTS_PER_POST, noteSession);
+        done += 1;
+        console.log(`   [${area}] ${done}/${urls.length} done.`);
+
+        // Pace per worker, so the aggregate rate scales with concurrency
+        // rather than each worker sprinting.
+        if (cursor < urls.length && PACE_MAX_MS > 0) await sleep(paceDelay());
       }
     }
+
+    const workers = Math.min(POST_CONCURRENCY, urls.length);
+    console.log(`[${area}] Running ${workers} post(s) at a time.`);
+    await Promise.all(Array.from({ length: workers }, (_, s) => worker(s)));
+    results.push(...rows.filter(Boolean));
   }
 
   // Every row already carries its own `exit`, so the return shape is
