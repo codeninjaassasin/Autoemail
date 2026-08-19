@@ -398,9 +398,14 @@ async function openSession() {
 
   if (process.env.USE_PROXY !== '0') {
     // Round-robin, not consume: the pool is nearly always smaller than the
-    // number of posts, so entries have to come back around.
-    const picked = proxyPool.next() || (await proxyPool.nextWorking((m) => console.log(`   [proxy] ${m}`)));
+    // number of posts, so entries have to come back around. This can block —
+    // the pool rests each address between uses.
+    const picked =
+      (await proxyPool.next()) || (await proxyPool.nextWorking((m) => console.log(`   [proxy] ${m}`)));
     if (picked) {
+      if (picked.waitedMs > 0) {
+        console.log(`   [proxy] Waited ${(picked.waitedMs / 1000).toFixed(0)}s for ${picked.ip} to cool down.`);
+      }
       exit = { ...picked, direct: false };
     } else {
       // Worth saying loudly: the run continues on the IP that was already

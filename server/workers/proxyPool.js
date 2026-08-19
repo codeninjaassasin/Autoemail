@@ -483,17 +483,51 @@ async function warmPoolUncoordinated(target, log) {
 
 let ring = 0;
 
+// What burns an address is how fast it is asked, not how many times in total:
+// a single exit answered fine on a cold request and was challenged through six
+// back-to-back ones. So each address is rested between uses, independently of
+// the global pacing, which only knows how long since the last post and not
+// which address it went out on.
+const PER_IP_COOLDOWN_MS = Number(process.env.PROXY_IP_COOLDOWN_MS ?? 30000);
+const lastUsed = new Map();
+
 /**
- * Hands out the next proxy round-robin without consuming it.
+ * Hands out the next proxy round-robin, waiting if the one it lands on is
+ * still cooling down.
  *
- * Rotation is per post, and the pool is almost always smaller than the number
- * of posts, so entries have to come back around rather than being spent once.
+ * The pool is almost always smaller than the number of posts, so entries come
+ * back around rather than being spent once — which is exactly why the cooldown
+ * matters. Reservation happens before the wait, so concurrent callers see the
+ * slot as taken and spread across different addresses instead of queueing on
+ * the same one.
  */
-function next() {
+async function next() {
   if (verified.length === 0) return null;
-  const picked = verified[ring % verified.length];
+
+  const now = Date.now();
+  let best = null;
+  let bestReady = Infinity;
+  for (let i = 0; i < verified.length; i += 1) {
+    const p = verified[(ring + i) % verified.length];
+    const ready = (lastUsed.get(p.server) ?? 0) + PER_IP_COOLDOWN_MS;
+    if (ready < bestReady) {
+      best = p;
+      bestReady = ready;
+    }
+    // Anything already rested is good enough; no need to compare the rest.
+    if (ready <= now) break;
+  }
   ring += 1;
-  return picked;
+  if (!best) return null;
+
+  const startAt = Math.max(now, bestReady);
+  lastUsed.set(best.server, startAt);
+
+  const wait = startAt - now;
+  if (wait > 0) {
+    await new Promise((r) => setTimeout(r, wait));
+  }
+  return { ...best, waitedMs: wait };
 }
 
 /** Drops a proxy that has stopped working, so it isn't handed out again. */
