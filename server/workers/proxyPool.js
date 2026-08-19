@@ -1,12 +1,23 @@
 const http = require('http');
+const net = require('net');
 const tls = require('tls');
 
 // ProxyScrape's free list. Overridable so the same code can point at a paid
 // endpoint later without changes here.
-const LIST_URL =
-  process.env.PROXY_LIST_URL ||
-  'https://api.proxyscrape.com/v4/free-proxy-list/get' +
-    '?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text';
+// Both protocols are pulled: the http list alone is ~1000 entries, and socks5
+// adds ~500 more from a different population. Since most candidates fail, more
+// sources is the cheapest way to find residential ones.
+const LIST_URLS = (process.env.PROXY_LIST_URL
+  ? [process.env.PROXY_LIST_URL]
+  : ['http', 'socks5'].map(
+      (proto) =>
+        'https://api.proxyscrape.com/v4/free-proxy-list/get' +
+        `?request=display_proxies&protocol=${proto}&proxy_format=protocolipport&format=text`
+    ));
+
+const BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 // Checked over HTTPS, deliberately. Craigslist is HTTPS-only, so the browser
 // reaches it by asking the proxy to CONNECT-tunnel — a capability plenty of
@@ -67,17 +78,27 @@ async function fetchList(force = false) {
   const fresh = Date.now() - cachedAt < LIST_TTL_MS;
   if (!force && fresh && cachedList.length > 0) return cachedList;
 
-  const res = await fetch(LIST_URL, { signal: AbortSignal.timeout(20000) });
-  if (!res.ok) throw new Error(`Proxy list fetch failed: HTTP ${res.status}`);
-  const text = await res.text();
-
-  // Shuffled so concurrent runs don't march down the same dead prefix.
-  cachedList = shuffle(
-    text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => /^https?:\/\/[\d.]+:\d+$/.test(l))
+  const texts = await Promise.all(
+    LIST_URLS.map((u) =>
+      fetch(u, { signal: AbortSignal.timeout(20000) })
+        .then((r) => (r.ok ? r.text() : ''))
+        // One source being down shouldn't take the others with it.
+        .catch(() => '')
+    )
   );
+  const joined = texts.join('\n');
+  if (!joined.trim()) throw new Error('Proxy list fetch failed: all sources empty');
+
+  // Shuffled so concurrent runs don't march down the same dead prefix, and so
+  // the two protocols interleave instead of http monopolising the first pass.
+  cachedList = shuffle([
+    ...new Set(
+      joined
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => /^(https?|socks[45]):\/\/[\d.]+:\d+$/.test(l))
+    ),
+  ]);
   cachedAt = Date.now();
   cursor = 0;
   return cachedList;
@@ -101,7 +122,103 @@ function field(raw, name) {
  * Resolves to null for any failure — dead, refused, no CONNECT, TLS reset,
  * timeout, garbage body.
  */
+/**
+ * Opens a raw TCP tunnel to host:443 through a SOCKS5 proxy.
+ *
+ * Implemented directly because the protocol is short and it avoids a
+ * dependency: greet with "no auth", then issue a CONNECT naming the host so
+ * the proxy resolves it — resolving locally would leak our DNS and, for
+ * Craigslist's anycast setup, can pick an address the proxy can't reach.
+ */
+function socks5Connect(proxyUrl, host, port = 443) {
+  return new Promise((resolve) => {
+    const url = new URL(proxyUrl);
+    const socket = net.connect({ host: url.hostname, port: Number(url.port) });
+    let stage = 'greet';
+    let settled = false;
+
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(null);
+    };
+
+    socket.setTimeout(VALIDATE_TIMEOUT_MS, fail);
+    socket.on('error', fail);
+    socket.on('close', fail);
+
+    socket.on('connect', () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
+
+    socket.on('data', (chunk) => {
+      if (settled) return;
+      if (stage === 'greet') {
+        // VER=5, METHOD=0 (no auth). Anything else and we can't proceed.
+        if (chunk[0] !== 0x05 || chunk[1] !== 0x00) return fail();
+        stage = 'connect';
+        const name = Buffer.from(host, 'ascii');
+        const req = Buffer.concat([
+          Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]),
+          name,
+          Buffer.from([(port >> 8) & 0xff, port & 0xff]),
+        ]);
+        socket.write(req);
+        return;
+      }
+      if (stage === 'connect') {
+        // REP=0 means the tunnel is open; the socket is now a pipe to host.
+        if (chunk[0] !== 0x05 || chunk[1] !== 0x00) return fail();
+        settled = true;
+        stage = 'open';
+        socket.setTimeout(0);
+        socket.removeAllListeners('data');
+        socket.removeAllListeners('close');
+        socket.removeAllListeners('error');
+        socket.removeAllListeners('timeout');
+        resolve(socket);
+      }
+    });
+  });
+}
+
+/** Runs the TLS + GET half of a check over an already-open tunnel socket. */
+function fetchOverSocket(socket, host, path) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    const secure = tls.connect({ socket, servername: host }, () => {
+      secure.write(
+        `GET ${path} HTTP/1.1\r\nHost: ${host}\r\n` +
+          `User-Agent: ${BROWSER_UA}\r\nAccept: */*\r\nConnection: close\r\n\r\n`
+      );
+    });
+    let raw = '';
+    secure.setEncoding('utf8');
+    secure.on('data', (c) => {
+      raw += c;
+      if (raw.length > 16384) secure.destroy();
+    });
+    const finish = () => done(raw || null);
+    secure.on('end', finish);
+    secure.on('close', finish);
+    secure.on('error', () => done(null));
+    secure.setTimeout(VALIDATE_TIMEOUT_MS, () => { secure.destroy(); done(null); });
+  });
+}
+
 function tunnelFetch(proxyUrl, host, path) {
+  // SOCKS proxies speak a different protocol entirely — an HTTP CONNECT to
+  // one just gets dropped, which is why they were all being scored dead.
+  if (proxyUrl.startsWith('socks')) {
+    return socks5Connect(proxyUrl, host).then((socket) =>
+      socket ? fetchOverSocket(socket, host, path) : null
+    );
+  }
+
   return new Promise((resolve) => {
     let url;
     try {
@@ -136,8 +253,7 @@ function tunnelFetch(proxyUrl, host, path) {
       const secure = tls.connect({ socket, servername: host }, () => {
         secure.write(
           `GET ${path} HTTP/1.1\r\nHost: ${host}\r\n` +
-            'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
-            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n' +
+            `User-Agent: ${BROWSER_UA}\r\n` +
             'Accept: */*\r\nConnection: close\r\n\r\n'
         );
       });

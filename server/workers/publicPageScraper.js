@@ -42,7 +42,50 @@ async function looksChallenged(page) {
 // A single search page serves ~300 results and each post costs several
 // seconds, so cap the work per area — the whole scrape runs inside one
 // HTTP request and will otherwise outlive any client timeout.
-const MAX_POSTS_PER_AREA = 25;
+const MAX_POSTS_PER_AREA = Number(process.env.MAX_POSTS_PER_AREA ?? 25);
+
+// Hitting posts back to back is a bot signal on its own, independent of which
+// address they come from — no human opens 25 listings in 90 seconds. The gap
+// is randomised because a precise interval is itself a pattern.
+const PACE_MIN_MS = Number(process.env.PACE_MIN_MS ?? 5000);
+const PACE_MAX_MS = Number(process.env.PACE_MAX_MS ?? 15000);
+
+function paceDelay() {
+  const lo = Math.min(PACE_MIN_MS, PACE_MAX_MS);
+  const hi = Math.max(PACE_MIN_MS, PACE_MAX_MS);
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
+
+// Playwright's Chromium announces itself: navigator.webdriver is true, the
+// automation switch is on, and several APIs are missing or stubbed. Craigslist
+// reads those, so a rotated IP alone doesn't help if the browser still says
+// "I am a robot" on arrival.
+const LAUNCH_ARGS = [
+  '--disable-blink-features=AutomationControlled',
+  '--disable-features=IsolateOrigins,site-per-process',
+  '--no-sandbox',
+];
+
+const UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// Applied before any page script runs, so the values are already in place when
+// Craigslist's own fingerprinting executes.
+const STEALTH_INIT = () => {
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+  // Headless Chromium reports no chrome runtime; real Chrome always has one.
+  window.chrome = window.chrome || { runtime: {} };
+  const query = window.navigator.permissions?.query;
+  if (query) {
+    window.navigator.permissions.query = (p) =>
+      p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : query(p);
+  }
+};
 
 // Craigslist pins its CAPTCHA to the browser session, so dropping the whole
 // session and relaunching usually clears it. Cap the restarts: if the
@@ -161,9 +204,13 @@ async function readReplyPanel(page, area) {
   } catch {
     // The /init sniff above has to await the response body, which can resolve
     // after this 10s wait has already given up — so a real challenge shows up
-    // as "panel didn't open". The DOM is authoritative right now, so ask it
-    // before deciding what happened.
-    if (!out.challenged) out.challenged = await looksChallenged(page);
+    // as "panel didn't open". The DOM is authoritative, but the challenge
+    // widget is injected a beat after the panel fails, so give it a moment to
+    // appear rather than asking too early and recording the wrong cause.
+    if (!out.challenged) {
+      await page.waitForTimeout(2500).catch(() => {});
+      out.challenged = await looksChallenged(page);
+    }
     console.log(
       out.challenged
         ? `   [${area}] Craigslist served a CAPTCHA — contact details withheld.`
@@ -202,11 +249,16 @@ async function readReplyPanel(page, area) {
   return out;
 }
 
-async function getPostUrls(area, category, browser) {
+async function getPostUrls(area, category, ctx) {
   const listingUrl = buildSearchUrl(area, category);
-  const page = await browser.newPage();
+  const page = await ctx.newPage();
   try {
+    // Deliberately outside the timeout handling below: a navigation that fails
+    // is a broken proxy, not an empty category, and conflating the two got a
+    // dead proxy reported as "no listings" — which then looked like a real
+    // answer and ended the retries.
     await page.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
     // These live in the no-JS fallback list, which is present in the markup
     // but sits under a `display: none` parent — so wait for 'attached', not
     // the default 'visible', which would always time out.
@@ -221,7 +273,10 @@ async function getPostUrls(area, category, browser) {
     );
     return { urls: capped, challenged: false };
   } catch (err) {
-    if (err.name === 'TimeoutError') {
+    // A navigation failure means the proxy is gone; propagate so the caller
+    // drops it and tries another. Only a selector timeout on a page that did
+    // load can be read as "empty or challenged".
+    if (err.name === 'TimeoutError' && !isSessionFailure(err.message)) {
       // The results list never appearing means either an empty category or a
       // challenge standing in front of it — those need opposite responses, so
       // check before reporting.
@@ -343,10 +398,22 @@ async function openSession() {
   // Visible by default so you can watch it work; set HEADLESS=1 to suppress.
   const browser = await chromium.launch({
     headless: process.env.HEADLESS === '1',
+    args: LAUNCH_ARGS,
     ...(exit.server ? { proxy: { server: exit.server } } : {}),
   });
 
-  return { browser, exit };
+  // A context rather than the default one, so the fingerprint work applies to
+  // every page opened from this session.
+  const context = await browser.newContext({
+    userAgent: UA,
+    viewport: { width: 1440, height: 900 },
+    locale: 'en-US',
+    timezoneId: 'America/Los_Angeles',
+    deviceScaleFactor: 2,
+  });
+  await context.addInitScript(STEALTH_INIT);
+
+  return { browser, context, exit };
 }
 
 // Rotation is per post now, so the direct-identity lookup would otherwise
@@ -383,7 +450,7 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
     const label = session.exit.direct ? 'direct' : `${session.exit.ip} (${session.exit.location})`;
     if (attempt > 1) console.log(`   [${area}] Retry ${attempt}/${attemptsAllowed} via ${label}`);
 
-    const result = await runPost(session.browser, url, area, session.exit);
+    const result = await runPost(session.context, url, area, session.exit);
     await closeSession(session);
     last = result;
 
@@ -422,8 +489,8 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
  * `exit` is stamped on the row so each result records the IP it came through
  * — sessions rotate mid-run, so this varies from row to row.
  */
-async function runPost(browser, url, area, exit) {
-  const page = await browser.newPage();
+async function runPost(ctx, url, area, exit) {
+  const page = await ctx.newPage();
   try {
     const result = await processSinglePost(url, page, area);
     return { ...(result ?? { url, area, success: false, error: 'No reply button or modal' }), exit };
@@ -486,7 +553,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       const session = await openSession();
       noteSession(session.exit);
       try {
-        listing = await getPostUrls(area, category, session.browser);
+        listing = await getPostUrls(area, category, session.context);
       } catch (err) {
         listingError = err.message;
         listing = null;
@@ -497,9 +564,14 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       } finally {
         await closeSession(session);
       }
-      if (listing && !listing.challenged) break;
+      // Only a listing with actual URLs ends the retries. An empty result is
+      // usually a proxy that reached a different or partial page rather than a
+      // genuinely empty category, and treating it as an answer meant one bad
+      // proxy wrote off the whole area on the first try.
+      if (listing && !listing.challenged && listing.urls.length > 0) break;
       if (attempt < LISTING_ATTEMPTS) {
-        console.log(`   [${area}] Listing attempt ${attempt} failed — trying another proxy.`);
+        const why = !listing ? 'navigation failed' : listing.challenged ? 'CAPTCHA' : 'no results';
+        console.log(`   [${area}] Listing attempt ${attempt}/${LISTING_ATTEMPTS} (${why}) — trying another proxy.`);
       }
     }
 
@@ -558,6 +630,14 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       );
       results.push(result);
       console.log(`   [${area}] ${i + 1}/${listing.urls.length} done.`);
+
+      // Pace only between posts — no reason to wait after the last one.
+      const more = i < listing.urls.length - 1;
+      if (more && PACE_MAX_MS > 0) {
+        const wait = paceDelay();
+        console.log(`   [${area}] Waiting ${(wait / 1000).toFixed(1)}s before the next post.`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
     }
   }
 
