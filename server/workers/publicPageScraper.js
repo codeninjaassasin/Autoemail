@@ -392,7 +392,7 @@ async function processSinglePost(postUrl, page, area) {
  * would look identical to a working rotation while changing nothing about the
  * block. Set USE_PROXY=0 to skip the pool entirely.
  */
-async function openSession() {
+async function pickExit() {
   let exit = { server: null, ip: 'unknown', location: 'Unknown', direct: true };
   let cached = null;
 
@@ -419,25 +419,7 @@ async function openSession() {
     exit = { ...cached, direct: true };
   }
 
-  // Visible by default so you can watch it work; set HEADLESS=1 to suppress.
-  const browser = await chromium.launch({
-    headless: process.env.HEADLESS === '1',
-    args: LAUNCH_ARGS,
-    ...(exit.server ? { proxy: { server: exit.server } } : {}),
-  });
-
-  // A context rather than the default one, so the fingerprint work applies to
-  // every page opened from this session.
-  const context = await browser.newContext({
-    userAgent: UA,
-    viewport: { width: 1440, height: 900 },
-    locale: 'en-US',
-    timezoneId: 'America/Los_Angeles',
-    deviceScaleFactor: 2,
-  });
-  await context.addInitScript(STEALTH_INIT);
-
-  return { browser, context, exit };
+  return exit;
 }
 
 // Rotation is per post now, so the direct-identity lookup would otherwise
@@ -451,6 +433,55 @@ async function directIdentityCached() {
 /** Closes a session's browser, tolerating one that has already crashed. */
 async function closeSession(session) {
   if (session?.browser) await session.browser.close().catch(() => {});
+}
+
+// One live session per exit, kept warm across posts.
+//
+// A fresh browser per post was the single largest cause of challenges: it
+// arrives at a listing with an empty cookie jar, which no real visitor does —
+// people reach a post from the search page carrying the cookies it set.
+// Measured directly: a fresh context per post was challenged on every attempt,
+// while reusing one context opened the panel on every attempt through the same
+// proxies. Keyed by proxy so rotation still gives each exit its own identity.
+const liveSessions = new Map();
+
+async function sessionFor(exit) {
+  const key = exit.server || 'direct';
+  const existing = liveSessions.get(key);
+  if (existing) return existing;
+
+  const browser = await chromium.launch({
+    headless: process.env.HEADLESS === '1',
+    args: LAUNCH_ARGS,
+    ...(exit.server ? { proxy: { server: exit.server } } : {}),
+  });
+  const context = await browser.newContext({
+    userAgent: UA,
+    viewport: { width: 1440, height: 900 },
+    locale: 'en-US',
+    timezoneId: 'America/Los_Angeles',
+    deviceScaleFactor: 2,
+  });
+  await context.addInitScript(STEALTH_INIT);
+
+  const session = { browser, context, exit };
+  liveSessions.set(key, session);
+  return session;
+}
+
+/** Drops a session whose exit has died or been burned. */
+async function retireSession(exit) {
+  const key = exit.server || 'direct';
+  const s = liveSessions.get(key);
+  if (!s) return;
+  liveSessions.delete(key);
+  await closeSession(s);
+}
+
+async function retireAllSessions() {
+  const all = [...liveSessions.values()];
+  liveSessions.clear();
+  await Promise.all(all.map(closeSession));
 }
 
 /**
@@ -468,21 +499,24 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
   let last = null;
 
   for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
-    const session = await openSession();
-    onSession?.(session.exit);
+    const exit = await pickExit();
+    onSession?.(exit);
+    // Reused, not rebuilt: the warm cookie jar is what keeps the reply panel
+    // from being challenged.
+    const session = await sessionFor(exit);
 
-    const label = session.exit.direct ? 'direct' : `${session.exit.ip} (${session.exit.location})`;
+    const label = exit.direct ? 'direct' : `${exit.ip} (${exit.location})`;
     if (attempt > 1) console.log(`   [${area}] Retry ${attempt}/${attemptsAllowed} via ${label}`);
 
-    const result = await runPost(session.context, url, area, session.exit);
-    await closeSession(session);
+    const result = await runPost(session.context, url, area, exit);
     last = result;
 
     if (result.sessionFailed) {
       // Proven bad right now — stop offering it to later posts.
-      if (session.exit.server && proxyPool.markDead(session.exit.server)) {
+      await retireSession(exit);
+      if (exit.server && proxyPool.markDead(exit.server)) {
         console.log(
-          `   [proxy] Dropped ${session.exit.ip} from the pool ` +
+          `   [proxy] Dropped ${exit.ip} from the pool ` +
             `(${proxyPool.size()} left): ${result.error.split('\n')[0].slice(0, 50)}`
         );
       }
@@ -493,11 +527,12 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
       // will keep being challenged. Strike it, and once it's burned it leaves
       // the pool — otherwise it gets handed to post after post, which looks
       // like rotation while changing nothing.
-      if (session.exit.server && proxyPool.markChallenged(session.exit.server)) {
+      if (exit.server && proxyPool.markChallenged(exit.server)) {
         console.log(
-          `   [proxy] Burned ${session.exit.ip} — challenged repeatedly, ` +
+          `   [proxy] Burned ${exit.ip} — challenged repeatedly, ` +
             `dropped from the pool (${proxyPool.size()} left).`
         );
+        await retireSession(exit);
       }
       continue; // a different IP may not be challenged
     }
@@ -616,19 +651,22 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     let listingError = null;
 
     for (let attempt = 1; attempt <= LISTING_ATTEMPTS; attempt += 1) {
-      const session = await openSession();
-      noteSession(session.exit);
+      const exit = await pickExit();
+      noteSession(exit);
+      // Kept open rather than closed: fetching the listing is what warms this
+      // exit's cookie jar, and the posts that follow inherit it. Discarding it
+      // here is precisely the mistake that got every post challenged.
+      const session = await sessionFor(exit);
       try {
         listing = await getPostUrls(area, category, session.context);
       } catch (err) {
         listingError = err.message;
         listing = null;
-        if (session.exit.server && isSessionFailure(err.message)) {
-          proxyPool.markDead(session.exit.server);
-          console.log(`   [proxy] Dropped ${session.exit.ip} (${proxyPool.size()} left) — listing failed.`);
+        if (exit.server && isSessionFailure(err.message)) {
+          await retireSession(exit);
+          proxyPool.markDead(exit.server);
+          console.log(`   [proxy] Dropped ${exit.ip} (${proxyPool.size()} left) — listing failed.`);
         }
-      } finally {
-        await closeSession(session);
       }
       // Only a listing with actual URLs ends the retries. An empty result is
       // usually a proxy that reached a different or partial page rather than a
@@ -704,6 +742,10 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     await Promise.all(Array.from({ length: workers }, (_, s) => worker(s)));
     results.push(...rows.filter(Boolean));
   }
+
+  // Browsers are held open for the whole run now, so closing them is the
+  // run's job rather than each post's.
+  await retireAllSessions();
 
   // Every row already carries its own `exit`, so the return shape is
   // unchanged; this is just the run-level readout.
