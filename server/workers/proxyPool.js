@@ -1,4 +1,5 @@
 const http = require('http');
+const tls = require('tls');
 
 // ProxyScrape's free list. Overridable so the same code can point at a paid
 // endpoint later without changes here.
@@ -7,18 +8,27 @@ const LIST_URL =
   'https://api.proxyscrape.com/v4/free-proxy-list/get' +
     '?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text';
 
-// Plain HTTP so a validation request can go through an HTTP proxy as a simple
-// absolute-URI GET — no CONNECT tunnel, no extra dependency.
-const GEO_HOST = 'ip-api.com';
-const GEO_PATH = '/json/?fields=status,country,regionName,city,query';
+// Checked over HTTPS, deliberately. Craigslist is HTTPS-only, so the browser
+// reaches it by asking the proxy to CONNECT-tunnel — a capability plenty of
+// free HTTP proxies lack even while happily forwarding plain HTTP. Validating
+// over HTTP passes those, and the browser then dies with
+// ERR_TUNNEL_CONNECTION_FAILED. So the check has to use the same path the
+// scraper will.
+const GEO_HOST = 'ipinfo.io';
+const GEO_PATH = '/json';
+// The host the scraper actually needs to reach; reachability is proven against
+// this and nothing else.
+const TARGET_HOST = process.env.PROXY_TARGET_HOST || 'www.craigslist.org';
 
 const VALIDATE_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS ?? 8000);
 // The free list is mostly dead, so a launch must be allowed to give up rather
 // than walk all 1000 entries.
-const MAX_CANDIDATES = Number(process.env.PROXY_MAX_TRIES ?? 60);
-// Probed concurrently — see nextWorking. Kept modest so a run doesn't open
-// dozens of sockets at once.
-const PROBE_BATCH = Number(process.env.PROXY_PROBE_BATCH ?? 20);
+// Testing against Craigslist itself rejects far more than a generic liveness
+// check did — correctly, but it means many more candidates before a hit. The
+// list holds ~1000, so a wider search is cheap; batches run concurrently, so
+// the cost is roughly one timeout per batch rather than per proxy.
+const MAX_CANDIDATES = Number(process.env.PROXY_MAX_TRIES ?? 200);
+const PROBE_BATCH = Number(process.env.PROXY_PROBE_BATCH ?? 40);
 const LIST_TTL_MS = 10 * 60 * 1000;
 
 let cachedList = [];
@@ -57,14 +67,25 @@ async function fetchList(force = false) {
   return cachedList;
 }
 
+/** Pulls a field out of a raw HTTP response without un-chunking it first. */
+function field(raw, name) {
+  const m = raw.match(new RegExp(`"${name}"\\s*:\\s*"([^"]*)"`));
+  return m ? m[1] : '';
+}
+
 /**
- * Asks ip-api.com, through the proxy, what IP it sees. A proxy that answers
- * proves three things at once: it's alive, it forwards traffic, and it tells
- * us the exit IP we'll actually be presenting to Craigslist.
+ * Opens a CONNECT tunnel through the proxy and fetches ipinfo.io over TLS
+ * inside it — the exact sequence the browser performs against Craigslist.
  *
- * Resolves to null for any failure — dead, refused, timed out, garbage body.
+ * Succeeding proves everything that matters in one shot: the proxy is alive,
+ * it grants CONNECT, TLS survives the hop, and the JSON names the exit IP we
+ * will actually present. Anything less than the full sequence is a proxy the
+ * scraper can't use.
+ *
+ * Resolves to null for any failure — dead, refused, no CONNECT, TLS reset,
+ * timeout, garbage body.
  */
-function validate(proxyUrl) {
+function tunnelFetch(proxyUrl, host, path) {
   return new Promise((resolve) => {
     let url;
     try {
@@ -73,44 +94,113 @@ function validate(proxyUrl) {
       return resolve(null);
     }
 
-    const req = http.request(
-      {
-        host: url.hostname,
-        port: url.port,
-        method: 'GET',
-        // Absolute-URI form: this is what makes it a proxy request.
-        path: `http://${GEO_HOST}${GEO_PATH}`,
-        headers: { Host: GEO_HOST, 'User-Agent': 'curl/8' },
-        timeout: VALIDATE_TIMEOUT_MS,
-      },
-      (res) => {
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => {
-          body += c;
-          // A misbehaving proxy can stream an error page indefinitely.
-          if (body.length > 8192) req.destroy();
-        });
-        res.on('end', () => {
-          try {
-            const j = JSON.parse(body);
-            if (j.status !== 'success' || !j.query) return resolve(null);
-            resolve({
-              server: proxyUrl,
-              ip: j.query,
-              location: [j.city, j.regionName, j.country].filter(Boolean).join(', ') || 'Unknown',
-            });
-          } catch {
-            resolve(null);
-          }
-        });
-      }
-    );
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
 
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-    req.on('error', () => resolve(null));
+    const req = http.request({
+      host: url.hostname,
+      port: url.port,
+      method: 'CONNECT',
+      path: `${host}:443`,
+      headers: { Host: `${host}:443` },
+      timeout: VALIDATE_TIMEOUT_MS,
+    });
+
+    req.on('connect', (res, socket) => {
+      // Anything but 200 means the proxy declined to tunnel.
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        return done(null);
+      }
+
+      const secure = tls.connect({ socket, servername: host }, () => {
+        secure.write(
+          `GET ${path} HTTP/1.1\r\nHost: ${host}\r\n` +
+            'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n' +
+            'Accept: */*\r\nConnection: close\r\n\r\n'
+        );
+      });
+
+      let raw = '';
+      secure.setEncoding('utf8');
+      secure.on('data', (c) => {
+        raw += c;
+        // A misbehaving proxy can stream an error page indefinitely.
+        if (raw.length > 16384) secure.destroy();
+      });
+      const finish = () => done(raw || null);
+      secure.on('end', finish);
+      secure.on('close', finish);
+      secure.on('error', () => done(null));
+      secure.setTimeout(VALIDATE_TIMEOUT_MS, () => { secure.destroy(); done(null); });
+    });
+
+    req.on('timeout', () => { req.destroy(); done(null); });
+    req.on('error', () => done(null));
     req.end();
   });
+}
+
+function validate(proxyUrl) {
+  // Reachability is tested against Craigslist itself, not a stand-in. Proxies
+  // routinely tunnel to one host and get reset by another — Craigslist drops
+  // connections from addresses it already knows — so a proxy proven against
+  // ipinfo.io still dies in the browser. Only the real target settles it.
+  //
+  // Identity runs alongside but is best-effort: a proxy that reaches
+  // Craigslist is usable even when the geo lookup won't answer, and rejecting
+  // it over a missing label would throw away the thing we were looking for.
+  return Promise.all([
+    tunnelFetch(proxyUrl, TARGET_HOST, '/'),
+    tunnelFetch(proxyUrl, GEO_HOST, GEO_PATH),
+  ]).then(async ([reach, ident]) => {
+    if (!reach || !/^HTTP\/[\d.]+ \d{3}/.test(reach)) return null;
+
+    const ip = ident ? field(ident, 'ip') : '';
+    if (ip) {
+      return {
+        server: proxyUrl,
+        ip,
+        ipVerified: true,
+        location:
+          [field(ident, 'city'), field(ident, 'region'), field(ident, 'country')]
+            .filter(Boolean)
+            .join(', ') || 'Unknown',
+      };
+    }
+
+    // Many of these proxies only permit certain destinations, so the echo
+    // service is unreachable even though Craigslist isn't. Rather than report
+    // "unknown", fall back to the proxy's own address — usually but not always
+    // the exit — geolocated from here, and mark it unverified so the
+    // distinction survives into the UI.
+    const host = new URL(proxyUrl).hostname;
+    return {
+      server: proxyUrl,
+      ip: host,
+      ipVerified: false,
+      location: await geoOf(host),
+    };
+  });
+}
+
+/** Geolocates an address over our own connection, not through the proxy. */
+async function geoOf(ip) {
+  try {
+    const res = await fetch(`https://${GEO_HOST}/${ip}${GEO_PATH}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(6000),
+    });
+    const j = await res.json();
+    return [j.city, j.region, j.country].filter(Boolean).join(', ') || 'Unknown';
+  } catch {
+    return 'Unknown';
+  }
 }
 
 /**
@@ -160,7 +250,12 @@ async function warmPool(target = 4, log = () => {}) {
   }
 
   report.working = verified.length;
-  report.proxies = verified.map((p) => ({ server: p.server, ip: p.ip, location: p.location }));
+  report.proxies = verified.map((p) => ({
+    server: p.server,
+    ip: p.ip,
+    location: p.location,
+    ipVerified: p.ipVerified,
+  }));
   return report;
 }
 
@@ -227,13 +322,16 @@ async function nextWorking(log = () => {}) {
 /** Reports the IP seen with no proxy, so a direct run is still identified. */
 async function directIdentity() {
   try {
-    const res = await fetch(`http://${GEO_HOST}${GEO_PATH}`, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(`https://${GEO_HOST}${GEO_PATH}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
     const j = await res.json();
-    if (j.status !== 'success') return { server: null, ip: 'unknown', location: 'Unknown' };
+    if (!j.ip) return { server: null, ip: 'unknown', location: 'Unknown' };
     return {
       server: null,
-      ip: j.query,
-      location: [j.city, j.regionName, j.country].filter(Boolean).join(', ') || 'Unknown',
+      ip: j.ip,
+      location: [j.city, j.region, j.country].filter(Boolean).join(', ') || 'Unknown',
     };
   } catch {
     return { server: null, ip: 'unknown', location: 'Unknown' };

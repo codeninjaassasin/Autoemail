@@ -311,7 +311,11 @@ function renderProxyCheck(check) {
     for (const p of check.proxies) {
       const line = document.createElement('div');
       line.style.color = 'var(--muted)';
-      line.innerHTML = `<code>${escapeHtml(p.ip)}</code> — ${escapeHtml(p.location || 'Unknown')}`;
+      // Unverified means the echo service was unreachable through that proxy,
+      // so this is its own address rather than a confirmed exit.
+      line.innerHTML =
+        `<code>${escapeHtml(p.ip)}</code> — ${escapeHtml(p.location || 'Unknown')}` +
+        (p.ipVerified === false ? ' <span title="Proxy address; exit IP not confirmed">(unconfirmed)</span>' : '');
       box.appendChild(line);
     }
   }
