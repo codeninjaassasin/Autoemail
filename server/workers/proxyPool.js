@@ -74,7 +74,22 @@ function shuffle(items) {
   return out;
 }
 
+// A fixed set of proxies you control — local VPN containers, or anything else
+// that isn't a scraped public list. These are never shuffled away or refetched,
+// and the datacenter filter doesn't apply: you chose them deliberately, and a
+// VPN exit is a hosting ASN by definition.
+const STATIC_PROXIES = (process.env.PROXY_STATIC || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function usingStaticProxies() {
+  return STATIC_PROXIES.length > 0;
+}
+
 async function fetchList(force = false) {
+  if (usingStaticProxies()) return STATIC_PROXIES;
+
   const fresh = Date.now() - cachedAt < LIST_TTL_MS;
   if (!force && fresh && cachedList.length > 0) return cachedList;
 
@@ -398,8 +413,13 @@ async function warmPoolUncoordinated(target, log) {
   }
   report.listSize = list.length;
 
-  while (verified.length < target && report.checked < MAX_CANDIDATES) {
+  // A fixed list is worth exactly one pass — re-probing the same five entries
+  // two hundred times just burns the timeout budget.
+  const budget = usingStaticProxies() ? list.length : MAX_CANDIDATES;
+
+  while (verified.length < target && report.checked < budget) {
     if (cursor >= list.length) {
+      if (usingStaticProxies()) break;
       list = await fetchList(true).catch(() => list);
       cursor = 0;
       if (list.length === 0) break;
@@ -413,7 +433,7 @@ async function warmPoolUncoordinated(target, log) {
 
     let rejected = 0;
     for (const p of live) {
-      if (!ALLOW_DATACENTER && isDatacenter(p.org)) {
+      if (!ALLOW_DATACENTER && !usingStaticProxies() && isDatacenter(p.org)) {
         // Reachable, but Craigslist blocks the range on sight. Keeping it
         // would fill the pool with proxies guaranteed to be challenged.
         rejected += 1;

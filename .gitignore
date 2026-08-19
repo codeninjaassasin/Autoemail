@@ -13,3 +13,7 @@ proxies/
 Proxies/
 *.conf
 *.ovpn
+# Generated from those configs by scripts/build-vpn-proxies.js, and vpn/.env
+# holds the key. Belt and braces: ignore the whole directory, not just the
+# env file, since everything in it is regenerable.
+vpn/
