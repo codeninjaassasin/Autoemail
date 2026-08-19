@@ -38,16 +38,29 @@ if (files.length === 0) {
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const entries = [];
 
+// Surfshark issues one client key per account and rotating it invalidates the
+// previous one, so downloading configs at different times leaves all but the
+// newest holding a dead key. The key is not tied to a server, though — the
+// newest one authenticates against every endpoint — so take it from the most
+// recently written config and pair it with each server's own peer block.
+const newest = files
+  .map((f) => ({ f, mtime: fs.statSync(path.join(CONF_DIR, f)).mtimeMs }))
+  .sort((a, b) => b.mtime - a.mtime)[0].f;
+const newestText = fs.readFileSync(path.join(CONF_DIR, newest), 'utf8');
+const ACCOUNT_KEY = field(newestText, 'PrivateKey');
+const ACCOUNT_ADDRESS = field(newestText, 'Address');
+console.log(`Using the client key from ${newest} (most recent) for all tunnels.\n`);
+
 files.forEach((file, i) => {
   const text = fs.readFileSync(path.join(CONF_DIR, file), 'utf8');
   const name = path.basename(file, '.conf');
   const port = BASE_PORT + i;
 
-  // Each config has its own key pair — they are not shared across servers.
+  // Interface comes from the account's live key; only the peer varies.
   const conf =
     `[Interface]\n` +
-    `PrivateKey = ${field(text, 'PrivateKey')}\n` +
-    `Address = ${field(text, 'Address')}\n` +
+    `PrivateKey = ${ACCOUNT_KEY}\n` +
+    `Address = ${ACCOUNT_ADDRESS}\n` +
     `DNS = ${(field(text, 'DNS') || '1.1.1.1').split(',')[0].trim()}\n` +
     `\n[Peer]\n` +
     `PublicKey = ${field(text, 'PublicKey')}\n` +
