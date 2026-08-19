@@ -263,6 +263,33 @@ async function warmPool(target = 4, log = () => {}) {
   return report;
 }
 
+let ring = 0;
+
+/**
+ * Hands out the next proxy round-robin without consuming it.
+ *
+ * Rotation is per post, and the pool is almost always smaller than the number
+ * of posts, so entries have to come back around rather than being spent once.
+ */
+function next() {
+  if (verified.length === 0) return null;
+  const picked = verified[ring % verified.length];
+  ring += 1;
+  return picked;
+}
+
+/** Drops a proxy that has stopped working, so it isn't handed out again. */
+function markDead(server) {
+  const before = verified.length;
+  verified = verified.filter((p) => p.server !== server);
+  return before !== verified.length;
+}
+
+/** How many verified proxies are currently available. */
+function size() {
+  return verified.length;
+}
+
 async function nextWorking(log = () => {}) {
   // Spend a pre-checked proxy first — that's the whole point of checking.
   if (verified.length > 0) {
@@ -342,4 +369,4 @@ async function directIdentity() {
   }
 }
 
-module.exports = { warmPool, nextWorking, directIdentity, validate, fetchList };
+module.exports = { warmPool, next, markDead, size, nextWorking, directIdentity, validate, fetchList };

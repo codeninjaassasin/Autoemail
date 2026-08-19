@@ -49,11 +49,17 @@ const MAX_POSTS_PER_AREA = 25;
 // challenge follows us into a clean session the block is on the IP, and
 // relaunching forever just stalls the run.
 const MAX_SESSION_RESTARTS = 3;
-// Free proxies die mid-run routinely, and that is a different failure from a
-// CAPTCHA: it wastes every remaining post rather than just one. It gets its
-// own budget so a collapsing proxy can't consume the allowance reserved for
-// challenges, and a larger one because dying is what these proxies do.
-const MAX_PROXY_FAILURES = Number(process.env.PROXY_MAX_FAILURES ?? 5);
+
+// Every post gets its own browser on its own proxy. Attempts here are per
+// post, not per run: a CAPTCHA or a dead proxy costs this post a retry on the
+// next address and nothing more, so the run still reaches the full count.
+const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 3);
+const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
+// Free proxies die constantly, so the pool is refilled once it thins out —
+// otherwise a long run ends up cycling the last one or two survivors, which
+// is no longer rotation.
+const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 8);
+const MIN_POOL_SIZE = Number(process.env.PROXY_POOL_MIN ?? 3);
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -313,19 +319,24 @@ async function processSinglePost(postUrl, page, area) {
  */
 async function openSession() {
   let exit = { server: null, ip: 'unknown', location: 'Unknown', direct: true };
+  let cached = null;
 
   if (process.env.USE_PROXY !== '0') {
-    const picked = await proxyPool.nextWorking((msg) => console.log(`   [proxy] ${msg}`));
+    // Round-robin, not consume: the pool is nearly always smaller than the
+    // number of posts, so entries have to come back around.
+    const picked = proxyPool.next() || (await proxyPool.nextWorking((m) => console.log(`   [proxy] ${m}`)));
     if (picked) {
       exit = { ...picked, direct: false };
     } else {
       // Worth saying loudly: the run continues on the IP that was already
       // being blocked.
-      console.log('   [proxy] Falling back to a DIRECT connection — no rotation this session.');
-      exit = { ...(await proxyPool.directIdentity()), direct: true };
+      console.log('   [proxy] No proxy available — this request goes out DIRECT.');
+      cached = await directIdentityCached();
+      exit = { ...cached, direct: true };
     }
   } else {
-    exit = { ...(await proxyPool.directIdentity()), direct: true };
+    cached = await directIdentityCached();
+    exit = { ...cached, direct: true };
   }
 
   // Visible by default so you can watch it work; set HEADLESS=1 to suppress.
@@ -334,29 +345,63 @@ async function openSession() {
     ...(exit.server ? { proxy: { server: exit.server } } : {}),
   });
 
-  console.log(
-    `   [proxy] Session exit IP ${exit.ip} (${exit.location})` +
-      `${exit.direct ? ' — direct, no proxy' : ` via ${exit.server}`}`
-  );
   return { browser, exit };
 }
 
+// Rotation is per post now, so the direct-identity lookup would otherwise
+// repeat on every one of them.
+let directCache = null;
+async function directIdentityCached() {
+  if (!directCache) directCache = await proxyPool.directIdentity();
+  return directCache;
+}
+
+/** Closes a session's browser, tolerating one that has already crashed. */
+async function closeSession(session) {
+  if (session?.browser) await session.browser.close().catch(() => {});
+}
+
 /**
- * Drops the flagged session and returns a fresh one — new browser and, where
- * the pool can supply one, a new exit IP too. Empty cookies and storage are
- * what shed a session-scoped CAPTCHA; a different IP is what sheds one scoped
- * to the address.
+ * Scrapes one post, rotating to a different proxy for each attempt.
+ *
+ * A fresh browser per attempt is the point: new IP, empty cookies. So a
+ * CAPTCHA and a dead proxy are handled the same way — try the next address —
+ * and neither costs anything beyond this one post. A proxy that fails to
+ * navigate is dropped from the pool rather than handed out again.
+ *
+ * Returns the first clean result, or the last attempt if none came clean, so
+ * every post yields a row either way.
  */
-async function restartSession(browser, area, label) {
-  console.log(
-    `   [${area}] Restarting Chrome (${label}) after a ` +
-      `${Math.round(SESSION_COOLDOWN_MS / 1000)}s cooldown.`
-  );
-  // A browser that already crashed will reject here; we're discarding it
-  // either way.
-  await browser.close().catch(() => {});
-  await new Promise((resolve) => setTimeout(resolve, SESSION_COOLDOWN_MS));
-  return openSession();
+async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
+  let last = null;
+
+  for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
+    const session = await openSession();
+    onSession?.(session.exit);
+
+    const label = session.exit.direct ? 'direct' : `${session.exit.ip} (${session.exit.location})`;
+    if (attempt > 1) console.log(`   [${area}] Retry ${attempt}/${attemptsAllowed} via ${label}`);
+
+    const result = await runPost(session.browser, url, area, session.exit);
+    await closeSession(session);
+    last = result;
+
+    if (result.sessionFailed) {
+      // Proven bad right now — stop offering it to later posts.
+      if (session.exit.server && proxyPool.markDead(session.exit.server)) {
+        console.log(
+          `   [proxy] Dropped ${session.exit.ip} from the pool ` +
+            `(${proxyPool.size()} left): ${result.error.split('\n')[0].slice(0, 50)}`
+        );
+      }
+      continue;
+    }
+    if (result.captchaBlocked) continue; // a different IP may not be challenged
+
+    return result; // clean
+  }
+
+  return last;
 }
 
 /**
@@ -392,7 +437,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   if (process.env.USE_PROXY !== '0') {
     console.log('── Checking proxies before scraping ──');
     const t0 = Date.now();
-    proxyCheck = await proxyPool.warmPool(MAX_SESSION_RESTARTS + 1, (m) => console.log(`   [proxy] ${m}`));
+    proxyCheck = await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
     proxyCheck.elapsedMs = Date.now() - t0;
 
     if (proxyCheck.working === 0) {
@@ -412,125 +457,94 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   // without waiting for the scrape.
   opts.onPreflight?.(proxyCheck);
 
-  let { browser, exit } = await openSession();
   const results = [];
-  const sessionsUsed = [{ ...exit, at: new Date().toISOString() }];
-  let restarts = 0;
-  let proxyFailures = 0;
-  let warnedExhausted = false;
-  let warnedProxyExhausted = false;
+  const sessionsUsed = [];
+  const noteSession = (e) => sessionsUsed.push({ ...e, at: new Date().toISOString() });
 
-  try {
-    for (let a = 0; a < areas.length; a += 1) {
-      const area = areas[a];
+  for (const area of areas) {
+    // Step 1: collect post URLs. The listing gets the same rotation treatment
+    // as a post — a challenge or a dead proxy here costs the whole area, so
+    // it's worth walking several addresses before giving up on it.
+    let listing = null;
+    let listingError = null;
 
-      // Step 1: collect post URLs for this area
-      let listing;
+    for (let attempt = 1; attempt <= LISTING_ATTEMPTS; attempt += 1) {
+      const session = await openSession();
+      noteSession(session.exit);
       try {
-        listing = await getPostUrls(area, category, browser);
-
-        // A challenge here costs us the whole area, so it's always worth a
-        // fresh session — unlike a blocked post, there is by definition work
-        // still pending. Retry the listing once on the clean browser.
-        if (listing.challenged && restarts < MAX_SESSION_RESTARTS) {
-          restarts += 1;
-          ({ browser, exit } = await restartSession(browser, area, `CAPTCHA restart ${restarts}/${MAX_SESSION_RESTARTS}`));
-          sessionsUsed.push({ ...exit, at: new Date().toISOString() });
-          listing = await getPostUrls(area, category, browser);
-        }
+        listing = await getPostUrls(area, category, session.browser);
       } catch (err) {
-        console.error(`[${area}] Listing page failed:`, err.message);
-        results.push({ area, success: false, error: `Could not load listing page: ${err.message}`, exit });
-        continue;
-      }
-
-      if (listing.challenged) {
-        // Distinct from "no listings": the area may well have posts, we just
-        // can't see them. Saying so keeps it from reading as an empty area.
-        results.push({
-          area,
-          success: false,
-          captchaBlocked: true,
-          error: 'Craigslist served a CAPTCHA on the search page, so no listings could be read.',
-          exit,
-        });
-        continue;
-      }
-
-      const postUrls = listing.urls;
-
-      if (postUrls.length === 0) {
-        // Without this the area contributes no rows at all and the UI shows
-        // an empty result set that looks like success.
-        results.push({ area, success: false, error: 'No listings found for this area/category.', exit });
-        continue;
-      }
-
-      // Step 2: process each post
-      for (let i = 0; i < postUrls.length; i += 1) {
-        const url = postUrls[i];
-        let result = await runPost(browser, url, area, exit);
-
-        // Only worth relaunching while posts remain — either later in this
-        // area or in one we haven't started. A CAPTCHA on the very last post
-        // has nothing left to protect.
-        const postsRemain = i < postUrls.length - 1 || a < areas.length - 1;
-
-        // A dead proxy fails every remaining post identically, so rotate off
-        // it immediately rather than grinding the rest of the run into the
-        // same error.
-        if (result.sessionFailed && postsRemain && proxyFailures < MAX_PROXY_FAILURES) {
-          proxyFailures += 1;
-          console.log(
-            `   [${area}] Session died (${result.error.split('\n')[0].slice(0, 60)}) — ` +
-              `rotating proxy (${proxyFailures}/${MAX_PROXY_FAILURES}).`
-          );
-          ({ browser, exit } = await restartSession(browser, area, `proxy ${proxyFailures}`));
-          sessionsUsed.push({ ...exit, at: new Date().toISOString() });
-          const retry = await runPost(browser, url, area, exit);
-          // Keep the retry either way: on a fresh session its verdict is the
-          // more informative one.
-          result = retry;
-        } else if (result.sessionFailed && postsRemain && !warnedProxyExhausted) {
-          warnedProxyExhausted = true;
-          console.log(
-            `   [${area}] ${MAX_PROXY_FAILURES} proxies died in this run — ` +
-              'stopping rotation and letting the remaining posts fail fast.'
-          );
+        listingError = err.message;
+        listing = null;
+        if (session.exit.server && isSessionFailure(err.message)) {
+          proxyPool.markDead(session.exit.server);
+          console.log(`   [proxy] Dropped ${session.exit.ip} (${proxyPool.size()} left) — listing failed.`);
         }
-
-        if (result.captchaBlocked && postsRemain) {
-          if (restarts < MAX_SESSION_RESTARTS) {
-            restarts += 1;
-            ({ browser, exit } = await restartSession(browser, area, `CAPTCHA restart ${restarts}/${MAX_SESSION_RESTARTS}`));
-            sessionsUsed.push({ ...exit, at: new Date().toISOString() });
-            // Retry the blocked post on the clean session — otherwise its
-            // contact details stay lost even though the restart cleared the
-            // block for everything after it. Keep the original row if the
-            // retry is challenged too, so the CAPTCHA stays reported.
-            const retry = await runPost(browser, url, area, exit);
-            if (!retry.captchaBlocked) result = retry;
-          } else if (!warnedExhausted) {
-            warnedExhausted = true;
-            console.log(
-              `   [${area}] CAPTCHA persists after ${MAX_SESSION_RESTARTS} restarts — ` +
-                'the block is on the IP, not the session. Continuing without reply details.'
-            );
-          }
-        }
-
-        results.push(result);
+      } finally {
+        await closeSession(session);
+      }
+      if (listing && !listing.challenged) break;
+      if (attempt < LISTING_ATTEMPTS) {
+        console.log(`   [${area}] Listing attempt ${attempt} failed — trying another proxy.`);
       }
     }
-  } finally {
-    await browser.close().catch(() => {});
+
+    if (!listing) {
+      results.push({ area, success: false, error: `Could not load listing page: ${listingError}` });
+      continue;
+    }
+    if (listing.challenged) {
+      // Distinct from "no listings": the area may well have posts, we just
+      // can't see them. Saying so keeps it from reading as an empty area.
+      results.push({
+        area,
+        success: false,
+        captchaBlocked: true,
+        error: `Craigslist served a CAPTCHA on the search page across ${LISTING_ATTEMPTS} proxies.`,
+      });
+      continue;
+    }
+    if (listing.urls.length === 0) {
+      // Without this the area contributes no rows at all and the UI shows
+      // an empty result set that looks like success.
+      results.push({ area, success: false, error: 'No listings found for this area/category.' });
+      continue;
+    }
+
+    // Step 2: one post at a time, each on the next proxy in the rotation.
+    console.log(
+      `[${area}] Scraping ${listing.urls.length} posts, rotating proxies ` +
+        `(${proxyPool.size()} in the pool).`
+    );
+
+    for (let i = 0; i < listing.urls.length; i += 1) {
+      // Top the pool back up when deaths have thinned it, so a long run keeps
+      // rotating instead of settling onto the last survivor.
+      if (process.env.USE_PROXY !== '0' && proxyPool.size() < MIN_POOL_SIZE) {
+        console.log(`   [proxy] Pool down to ${proxyPool.size()} — topping up.`);
+        await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
+      }
+
+      const result = await scrapePostWithRotation(
+        listing.urls[i],
+        area,
+        ATTEMPTS_PER_POST,
+        noteSession
+      );
+      results.push(result);
+      console.log(`   [${area}] ${i + 1}/${listing.urls.length} done.`);
+    }
   }
 
   // Every row already carries its own `exit`, so the return shape is
   // unchanged; this is just the run-level readout.
-  console.log(`\n── Exit IPs used (${sessionsUsed.length} session(s)) ──`);
-  for (const [i, s] of sessionsUsed.entries()) {
-    console.log(`   ${i + 1}. ${s.ip} — ${s.location}${s.direct ? '  [DIRECT, no proxy]' : `  via ${s.server}`}`);
+  const distinct = new Map();
+  for (const s of sessionsUsed) distinct.set(s.ip, s);
+  console.log(
+    `\n── Exit IPs: ${distinct.size} distinct across ${sessionsUsed.length} browser session(s) ──`
+  );
+  for (const s of distinct.values()) {
+    console.log(`   ${s.ip} — ${s.location}${s.direct ? '  [DIRECT, no proxy]' : `  via ${s.server}`}`);
   }
 
   return results;
