@@ -23,6 +23,9 @@ const CONF_DIR = fs.existsSync(path.join(ROOT, 'proxies'))
   ? path.join(ROOT, 'proxies')
   : path.join(ROOT, 'Proxies');
 const OUT_DIR = path.join(ROOT, 'vpn');
+// gluetun selects a Surfshark server by city, which keeps the address and the
+// peer key matched. Airport codes in the filenames map to those city names.
+const CITY = { 'us-clt': 'Charlotte', 'us-dtw': 'Detroit', 'us-hou': 'Houston', 'us-oma': 'Omaha', 'us-phx': 'Phoenix' };
 const BASE_PORT = Number(process.env.VPN_BASE_PORT ?? 8881);
 
 function parseConf(text) {
@@ -52,24 +55,32 @@ function parseConf(text) {
 
   const services = [];
   const proxies = [];
-  let privateKey = '';
+  const keyLines = [];
 
   for (const [i, file] of files.entries()) {
     const conf = parseConf(fs.readFileSync(path.join(CONF_DIR, file), 'utf8'));
     const name = path.basename(file, '.conf');
     const [host, port] = conf.endpoint.split(':');
 
-    // gluetun wants the endpoint as an IP; resolving here rather than in the
-    // container keeps startup from depending on DNS inside the namespace.
+    // Resolved only for display. It deliberately isn't pinned into the
+    // compose file: Surfshark round-robins these hostnames across servers that
+    // each have their own WireGuard public key, so a resolved IP is very
+    // likely paired with a key it doesn't own — the handshake is then rejected
+    // in silence and the tunnel comes up carrying no traffic. gluetun's own
+    // Surfshark provider keeps server addresses and keys matched, so it picks.
     let ip = host;
     try {
       ip = (await dns.resolve4(host))[0];
     } catch {
-      console.error(`  ! could not resolve ${host} for ${name}; leaving as-is`);
+      ip = '(unresolved)';
     }
 
-    // All Surfshark configs for one account share a private key.
-    privateKey = privateKey || conf.privateKey;
+    // Each config carries its own key — Surfshark does not reuse one per
+    // account, and assuming it did silently handed four of five containers a
+    // key the server rejected. WireGuard fails silently, so the tunnel came up
+    // and simply passed no traffic.
+    const envKey = `WG_PRIVATE_KEY_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+    keyLines.push(`${envKey}=${conf.privateKey}`);
 
     const hostPort = BASE_PORT + i;
     proxies.push({ name, url: `http://127.0.0.1:${hostPort}`, endpoint: `${host} (${ip})` });
@@ -81,15 +92,11 @@ function parseConf(text) {
       `    cap_add:\n      - NET_ADMIN\n` +
       `    devices:\n      - /dev/net/tun:/dev/net/tun\n` +
       `    environment:\n` +
-      `      - VPN_SERVICE_PROVIDER=custom\n` +
+      `      - VPN_SERVICE_PROVIDER=surfshark\n` +
       `      - VPN_TYPE=wireguard\n` +
-      `      - VPN_ENDPOINT_IP=${ip}\n` +
-      `      - VPN_ENDPOINT_PORT=${port || 51820}\n` +
-      `      - WIREGUARD_PUBLIC_KEY=${conf.publicKey}\n` +
-      `      - WIREGUARD_PRIVATE_KEY=\${WG_PRIVATE_KEY}\n` +
+      `      - SERVER_CITIES=${CITY[name] || name}\n` +
+      `      - WIREGUARD_PRIVATE_KEY=\${${envKey}}\n` +
       `      - WIREGUARD_ADDRESSES=${conf.address}\n` +
-      `      - DOT=off\n` +
-      `      - DNS_ADDRESS=1.1.1.1\n` +
       // The whole point: a proxy the host can reach, tunnel-side only.
       `      - HTTPPROXY=on\n` +
       `      - HTTPPROXY_LISTENING_ADDRESS=:8888\n` +
@@ -111,7 +118,7 @@ function parseConf(text) {
   );
 
   // Secret lives here, and .gitignore already covers .env at any depth.
-  fs.writeFileSync(path.join(OUT_DIR, '.env'), `WG_PRIVATE_KEY=${privateKey}\n`);
+  fs.writeFileSync(path.join(OUT_DIR, '.env'), keyLines.join('\n') + '\n');
   fs.chmodSync(path.join(OUT_DIR, '.env'), 0o600);
 
   const list = proxies.map((p) => p.url).join(',');
