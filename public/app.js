@@ -126,7 +126,6 @@ function renderResults(results) {
 const areaTagsEl     = document.getElementById('area-tags');
 const areaInputEl    = document.getElementById('area-input');
 const areaAddBtnEl   = document.getElementById('area-add-btn');
-const areaCategoryEl = document.getElementById('area-category');
 
 const selectedAreas = new Set();
 
@@ -180,8 +179,9 @@ researchSubmitBtn.addEventListener('click', async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        areas:    Array.from(selectedAreas),
-        category: areaCategoryEl.value,
+        areas: Array.from(selectedAreas),
+        // No category: the server walks every top-level section.
+        category: 'all',
       }),
     });
     const data = await res.json();
@@ -433,7 +433,8 @@ function renderResearchResults(results, proxyCheck) {
     cell(row,
       `<a href="${safeUrl(item.url)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">` +
       `${escapeHtml(item.name ?? '(untitled)')}</a>` +
-      `<div style="color:var(--muted);font-size:0.75rem;margin-top:0.15rem;">${escapeHtml(item.area || '')}</div>`
+      `<div style="color:var(--muted);font-size:0.75rem;margin-top:0.15rem;">` +
+      `${escapeHtml(item.area || '')}${item.categoryName ? ` · ${escapeHtml(item.categoryName)}` : ''}</div>`
     );
 
     cell(row,

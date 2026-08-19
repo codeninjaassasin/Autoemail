@@ -254,22 +254,11 @@
     <div id="area-tags" class="tag-container"></div>
   </div>
 
-  <!-- Category -->
-  <label style="font-size:0.875rem;color:var(--muted);display:block;margin:0.75rem 0 0.3rem;">
-    Category
-  </label>
-  <select id="area-category" style="padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.9rem;">
-    <option value="jjj">Jobs</option>
-    <option value="ggg">Gigs</option>
-    <!-- Job seekers advertising themselves, not employers hiring — the
-         opposite side of the market from Jobs. -->
-    <option value="rrr">Resumes</option>
-    <option value="bbb">Services</option>
-    <option value="sss">For Sale — General</option>
-    <option value="cto">Cars by Owner</option>
-    <option value="hhh">Housing</option>
-    <option value="lbr">Labor / Moving</option>
-  </select>
+  <!-- Every top-level section is scraped; there is nothing to choose. -->
+  <div style="font-size:0.875rem;color:var(--muted);margin:0.75rem 0 0.3rem;">
+    Scrapes <strong>all categories</strong> — community, events, for sale, gigs,
+    housing, jobs, resumes, services — limited to listings <strong>posted today</strong>.
+  </div>
 
   <div style="margin-top:0.75rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
     <button id="research-submit-btn" type="button">Start Scraping</button>

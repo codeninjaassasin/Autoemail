@@ -133,12 +133,33 @@ const SESSION_COOLDOWN_MS = Number(process.env.CAPTCHA_COOLDOWN_MS ?? 15000);
 const AREA_RE     = /^[a-z0-9-]+$/;
 const CATEGORY_RE = /^[a-z0-9]+$/;
 
+// Craigslist's top-level sections. Scraping every one of them is what "all
+// categories" means — the sub-categories underneath are reachable from these.
+const ALL_CATEGORIES = [
+  { code: 'ccc', name: 'community' },
+  { code: 'eee', name: 'events' },
+  { code: 'sss', name: 'for sale' },
+  { code: 'ggg', name: 'gigs' },
+  { code: 'hhh', name: 'housing' },
+  { code: 'jjj', name: 'jobs' },
+  { code: 'rrr', name: 'resumes' },
+  { code: 'bbb', name: 'services' },
+];
+
+// Filtering at the source rather than after the fact: it cuts a Seattle jobs
+// search from 320 results to 44, so the cap per category spends its budget on
+// listings that are actually current instead of months-old ones.
+const TODAY_ONLY = process.env.POSTED_TODAY !== '0';
+
 function buildSearchUrl(area, category) {
   // Both values land in a URL, so reject anything that could redirect the
   // browser to another host.
   if (!AREA_RE.test(area)) throw new Error(`Invalid area: ${area}`);
   if (!CATEGORY_RE.test(category)) throw new Error(`Invalid category: ${category}`);
-  return `https://www.craigslist.org/search/area/${area}?cat=${category}`;
+  return (
+    `https://www.craigslist.org/search/area/${area}?cat=${category}` +
+    (TODAY_ONLY ? '&postedToday=1' : '')
+  );
 }
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -176,6 +197,11 @@ function extractContacts(body) {
     // Body-text relays are redundant; we read the canonical one off the
     // reply panel instead.
     .filter((e) => !/craigslist\.org$/i.test(e))
+    // No mailbox lives at a www host. These are manufactured by
+    // deobfuscation — "apply online at www.example.com" becomes
+    // online@www.example.com — and one such address was a third of a run's
+    // harvest, feeding a draft to a mailbox that doesn't exist.
+    .filter((e) => !/@www\./i.test(e))
     .filter((e) => literal.has(e) || !PROSE_BEFORE_AT.has(e.split('@')[0].toLowerCase()));
   const phones = [...new Set((text.match(PHONE_RE) || []).map((p) => p.trim()))];
   return { emails, phones };
@@ -643,7 +669,20 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     return topUpInFlight;
   }
 
+  // An explicit category scrapes just that one; otherwise every section is
+  // walked. The cap applies per area *and* per category, so eight sections
+  // multiply the work — which is much of why the results are limited to
+  // today's postings.
+  const categories =
+    category && category !== 'all'
+      ? [{ code: category, name: category }]
+      : ALL_CATEGORIES;
+
   for (const area of areas) {
+   for (const cat of categories) {
+    const category = cat.code;
+    const label = categories.length > 1 ? `${area}/${cat.name}` : area;
+
     // Step 1: collect post URLs. The listing gets the same rotation treatment
     // as a post — a challenge or a dead proxy here costs the whole area, so
     // it's worth walking several addresses before giving up on it.
@@ -680,7 +719,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     }
 
     if (!listing) {
-      results.push({ area, success: false, error: `Could not load listing page: ${listingError}` });
+      results.push({ area, category, success: false, error: `Could not load listing page: ${listingError}` });
       continue;
     }
     if (listing.challenged) {
@@ -688,22 +727,29 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       // can't see them. Saying so keeps it from reading as an empty area.
       results.push({
         area,
+        category,
         success: false,
         captchaBlocked: true,
-        error: `Craigslist served a CAPTCHA on the search page across ${LISTING_ATTEMPTS} proxies.`,
+        error: `Craigslist served a CAPTCHA on the ${cat.name} search page across ${LISTING_ATTEMPTS} proxies.`,
       });
       continue;
     }
     if (listing.urls.length === 0) {
       // Without this the area contributes no rows at all and the UI shows
       // an empty result set that looks like success.
-      results.push({ area, success: false, error: 'No listings found for this area/category.' });
+      // Common and unremarkable now that results are limited to today: a
+      // quiet section simply has nothing new, which is not a failure.
+      if (categories.length === 1) {
+        results.push({ area, category, success: false, error: 'No listings found for this area/category.' });
+      } else {
+        console.log(`[${label}] nothing posted today.`);
+      }
       continue;
     }
 
     // Step 2: one post at a time, each on the next proxy in the rotation.
     console.log(
-      `[${area}] Scraping ${listing.urls.length} posts, rotating proxies ` +
+      `[${label}] Scraping ${listing.urls.length} posts, rotating proxies ` +
         `(${proxyPool.size()} in the pool).`
     );
 
@@ -727,9 +773,11 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
         if (i >= urls.length) return;
 
         await topUpPoolIfThin();
-        rows[i] = await scrapePostWithRotation(urls[i], area, ATTEMPTS_PER_POST, noteSession);
+        const row = await scrapePostWithRotation(urls[i], area, ATTEMPTS_PER_POST, noteSession);
+        // Carry the section through so a mixed run stays readable.
+        rows[i] = { ...row, category, categoryName: cat.name };
         done += 1;
-        console.log(`   [${area}] ${done}/${urls.length} done.`);
+        console.log(`   [${label}] ${done}/${urls.length} done.`);
 
         // Pace per worker, so the aggregate rate scales with concurrency
         // rather than each worker sprinting.
@@ -738,9 +786,10 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     }
 
     const workers = Math.min(POST_CONCURRENCY, urls.length);
-    console.log(`[${area}] Running ${workers} post(s) at a time.`);
+    console.log(`[${label}] Running ${workers} post(s) at a time.`);
     await Promise.all(Array.from({ length: workers }, (_, s) => worker(s)));
     results.push(...rows.filter(Boolean));
+   }
   }
 
   // Browsers are held open for the whole run now, so closing them is the
@@ -761,4 +810,4 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   return results;
 }
 
-module.exports = { scrapeAreas, processSinglePost, getPostUrls, looksChallenged };
+module.exports = { scrapeAreas, processSinglePost, getPostUrls, looksChallenged, extractContacts, ALL_CATEGORIES };
