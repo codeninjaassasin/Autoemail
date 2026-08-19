@@ -31,7 +31,12 @@ const GEO_PATH = '/json';
 // this and nothing else.
 const TARGET_HOST = process.env.PROXY_TARGET_HOST || 'www.craigslist.org';
 
-const VALIDATE_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS ?? 8000);
+// A local WireGuard tunnel adds a hop and its own handshake, so the 8s that
+// suits a direct HTTP proxy is short enough to fail identity lookups that
+// would otherwise succeed.
+const VALIDATE_TIMEOUT_MS = Number(
+  process.env.PROXY_TIMEOUT_MS ?? (process.env.PROXY_STATIC ? 20000 : 8000)
+);
 // The free list is mostly dead, so a launch must be allowed to give up rather
 // than walk all 1000 entries.
 // Testing against Craigslist itself rejects far more than a generic liveness
@@ -328,6 +333,20 @@ function validate(proxyUrl) {
     // the exit — geolocated from here, and mark it unverified so the
     // distinction survives into the UI.
     const host = new URL(proxyUrl).hostname;
+
+    // A local tunnel's own address says nothing: reporting 127.0.0.1 as the
+    // exit IP is worse than admitting we couldn't read it, because it looks
+    // like a real answer.
+    if (host === '127.0.0.1' || host === 'localhost' || host === '::1') {
+      return {
+        server: proxyUrl,
+        ip: 'unknown',
+        ipVerified: false,
+        org: '',
+        location: 'Local tunnel — exit not read',
+      };
+    }
+
     const info = await geoOf(host);
     return {
       server: proxyUrl,
