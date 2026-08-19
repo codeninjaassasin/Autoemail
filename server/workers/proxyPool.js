@@ -245,7 +245,11 @@ async function warmPool(target = 4, log = () => {}) {
     if (batch.length === 0) break;
 
     const live = (await Promise.all(batch.map((c) => validate(c)))).filter(Boolean);
-    verified.push(...live);
+    // Several entries often share a host on different ports. Rotating onto an
+    // address we're already using isn't a rotation, so keep one per IP.
+    for (const p of live) {
+      if (!verified.some((v) => v.ip === p.ip)) verified.push(p);
+    }
     log(`Checked ${report.checked} — ${verified.length}/${target} usable so far.`);
   }
 

@@ -49,6 +49,23 @@ const MAX_POSTS_PER_AREA = 25;
 // challenge follows us into a clean session the block is on the IP, and
 // relaunching forever just stalls the run.
 const MAX_SESSION_RESTARTS = 3;
+// Free proxies die mid-run routinely, and that is a different failure from a
+// CAPTCHA: it wastes every remaining post rather than just one. It gets its
+// own budget so a collapsing proxy can't consume the allowance reserved for
+// challenges, and a larger one because dying is what these proxies do.
+const MAX_PROXY_FAILURES = Number(process.env.PROXY_MAX_FAILURES ?? 5);
+
+// Chromium reports a broken proxy as a net:: error on navigation. Any of
+// these means the session is gone, not that this one post is unlucky —
+// retrying the next post on the same browser just reproduces it.
+function isSessionFailure(message = '') {
+  return (
+    /net::ERR_/i.test(message) ||
+    /ERR_(TUNNEL|PROXY|CONNECTION|EMPTY|ABORTED|TIMED_OUT|SOCKET)/i.test(message) ||
+    /page\.goto: Timeout/i.test(message) ||
+    /frame was detached/i.test(message)
+  );
+}
 // Relaunching instantly lands straight back on the rate limit that triggered
 // the challenge, so let the old session go cold first.
 const SESSION_COOLDOWN_MS = Number(process.env.CAPTCHA_COOLDOWN_MS ?? 15000);
@@ -330,10 +347,9 @@ async function openSession() {
  * what shed a session-scoped CAPTCHA; a different IP is what sheds one scoped
  * to the address.
  */
-async function restartSession(browser, area, attempt) {
+async function restartSession(browser, area, label) {
   console.log(
-    `   [${area}] CAPTCHA hit — restarting Chrome ` +
-      `(restart ${attempt}/${MAX_SESSION_RESTARTS}) after a ` +
+    `   [${area}] Restarting Chrome (${label}) after a ` +
       `${Math.round(SESSION_COOLDOWN_MS / 1000)}s cooldown.`
   );
   // A browser that already crashed will reject here; we're discarding it
@@ -355,7 +371,14 @@ async function runPost(browser, url, area, exit) {
     return { ...(result ?? { url, area, success: false, error: 'No reply button or modal' }), exit };
   } catch (err) {
     console.error(`[${area}] Post failed: ${url}`, err.message);
-    return { url, area, success: false, error: err.message, exit };
+    return {
+      url,
+      area,
+      success: false,
+      error: err.message,
+      sessionFailed: isSessionFailure(err.message),
+      exit,
+    };
   } finally {
     await page.close().catch(() => {});
   }
@@ -393,7 +416,9 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   const results = [];
   const sessionsUsed = [{ ...exit, at: new Date().toISOString() }];
   let restarts = 0;
+  let proxyFailures = 0;
   let warnedExhausted = false;
+  let warnedProxyExhausted = false;
 
   try {
     for (let a = 0; a < areas.length; a += 1) {
@@ -409,7 +434,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
         // still pending. Retry the listing once on the clean browser.
         if (listing.challenged && restarts < MAX_SESSION_RESTARTS) {
           restarts += 1;
-          ({ browser, exit } = await restartSession(browser, area, restarts));
+          ({ browser, exit } = await restartSession(browser, area, `CAPTCHA restart ${restarts}/${MAX_SESSION_RESTARTS}`));
           sessionsUsed.push({ ...exit, at: new Date().toISOString() });
           listing = await getPostUrls(area, category, browser);
         }
@@ -451,10 +476,33 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
         // has nothing left to protect.
         const postsRemain = i < postUrls.length - 1 || a < areas.length - 1;
 
+        // A dead proxy fails every remaining post identically, so rotate off
+        // it immediately rather than grinding the rest of the run into the
+        // same error.
+        if (result.sessionFailed && postsRemain && proxyFailures < MAX_PROXY_FAILURES) {
+          proxyFailures += 1;
+          console.log(
+            `   [${area}] Session died (${result.error.split('\n')[0].slice(0, 60)}) — ` +
+              `rotating proxy (${proxyFailures}/${MAX_PROXY_FAILURES}).`
+          );
+          ({ browser, exit } = await restartSession(browser, area, `proxy ${proxyFailures}`));
+          sessionsUsed.push({ ...exit, at: new Date().toISOString() });
+          const retry = await runPost(browser, url, area, exit);
+          // Keep the retry either way: on a fresh session its verdict is the
+          // more informative one.
+          result = retry;
+        } else if (result.sessionFailed && postsRemain && !warnedProxyExhausted) {
+          warnedProxyExhausted = true;
+          console.log(
+            `   [${area}] ${MAX_PROXY_FAILURES} proxies died in this run — ` +
+              'stopping rotation and letting the remaining posts fail fast.'
+          );
+        }
+
         if (result.captchaBlocked && postsRemain) {
           if (restarts < MAX_SESSION_RESTARTS) {
             restarts += 1;
-            ({ browser, exit } = await restartSession(browser, area, restarts));
+            ({ browser, exit } = await restartSession(browser, area, `CAPTCHA restart ${restarts}/${MAX_SESSION_RESTARTS}`));
             sessionsUsed.push({ ...exit, at: new Date().toISOString() });
             // Retry the blocked post on the clean session — otherwise its
             // contact details stay lost even though the restart cleared the
