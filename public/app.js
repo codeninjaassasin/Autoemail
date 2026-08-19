@@ -313,8 +313,11 @@ function renderProxyCheck(check) {
       line.style.color = 'var(--muted)';
       // Unverified means the echo service was unreachable through that proxy,
       // so this is its own address rather than a confirmed exit.
+      // The network matters more than the city: Craigslist blocks by ASN, so
+      // an ISP name is a good sign and a hosting one is not.
       line.innerHTML =
         `<code>${escapeHtml(p.ip)}</code> — ${escapeHtml(p.location || 'Unknown')}` +
+        (p.org ? ` · ${escapeHtml(p.org.replace(/^AS\d+\s*/, ''))}` : '') +
         (p.ipVerified === false ? ' <span title="Proxy address; exit IP not confirmed">(unconfirmed)</span>' : '');
       box.appendChild(line);
     }

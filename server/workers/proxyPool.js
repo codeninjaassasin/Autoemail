@@ -31,6 +31,22 @@ const MAX_CANDIDATES = Number(process.env.PROXY_MAX_TRIES ?? 200);
 const PROBE_BATCH = Number(process.env.PROXY_PROBE_BATCH ?? 40);
 const LIST_TTL_MS = 10 * 60 * 1000;
 
+// Craigslist blocks datacenter ranges wholesale — no real user browses from
+// EC2 — so a cloud-hosted proxy is challenged no matter how healthy it is.
+// This matters more than it looks: cloud proxies are the fast, stable ones,
+// so a plain "does it work" check quietly selects for exactly the addresses
+// that will be blocked. Residential ones are flakier but are the only sort
+// that gets through.
+const DATACENTER_ORG_RE =
+  // `cloud` deliberately unanchored: Pfcloud, UCLOUD and friends are hosting
+  // providers that a word-boundary match lets straight through.
+  /amazon|aws|google|microsoft|azure|alibaba|tencent|digitalocean|ovh|hetzner|linode|vultr|contabo|choopa|leaseweb|m247|scaleway|oracle|fdcservers|timeweb|serverius|netcup|constant company|cloud|datacenter|data center|hosting|colo\b|vps|dedicated server/i;
+const ALLOW_DATACENTER = process.env.PROXY_ALLOW_DATACENTER === '1';
+
+function isDatacenter(org = '') {
+  return DATACENTER_ORG_RE.test(org);
+}
+
 let cachedList = [];
 let cachedAt = 0;
 let cursor = 0;
@@ -167,6 +183,7 @@ function validate(proxyUrl) {
         server: proxyUrl,
         ip,
         ipVerified: true,
+        org: field(ident, 'org'),
         location:
           [field(ident, 'city'), field(ident, 'region'), field(ident, 'country')]
             .filter(Boolean)
@@ -180,11 +197,13 @@ function validate(proxyUrl) {
     // the exit — geolocated from here, and mark it unverified so the
     // distinction survives into the UI.
     const host = new URL(proxyUrl).hostname;
+    const info = await geoOf(host);
     return {
       server: proxyUrl,
       ip: host,
       ipVerified: false,
-      location: await geoOf(host),
+      org: info.org,
+      location: info.location,
     };
   });
 }
@@ -197,9 +216,12 @@ async function geoOf(ip) {
       signal: AbortSignal.timeout(6000),
     });
     const j = await res.json();
-    return [j.city, j.region, j.country].filter(Boolean).join(', ') || 'Unknown';
+    return {
+      org: j.org || '',
+      location: [j.city, j.region, j.country].filter(Boolean).join(', ') || 'Unknown',
+    };
   } catch {
-    return 'Unknown';
+    return { org: '', location: 'Unknown' };
   }
 }
 
@@ -245,12 +267,25 @@ async function warmPool(target = 4, log = () => {}) {
     if (batch.length === 0) break;
 
     const live = (await Promise.all(batch.map((c) => validate(c)))).filter(Boolean);
-    // Several entries often share a host on different ports. Rotating onto an
-    // address we're already using isn't a rotation, so keep one per IP.
+
+    let rejected = 0;
     for (const p of live) {
+      if (!ALLOW_DATACENTER && isDatacenter(p.org)) {
+        // Reachable, but Craigslist blocks the range on sight. Keeping it
+        // would fill the pool with proxies guaranteed to be challenged.
+        rejected += 1;
+        report.datacenterRejected = (report.datacenterRejected ?? 0) + 1;
+        continue;
+      }
+      // Several entries often share a host on different ports. Rotating onto
+      // an address we're already using isn't a rotation, so keep one per IP.
       if (!verified.some((v) => v.ip === p.ip)) verified.push(p);
     }
-    log(`Checked ${report.checked} — ${verified.length}/${target} usable so far.`);
+
+    log(
+      `Checked ${report.checked} — ${verified.length}/${target} usable` +
+        (rejected ? `, ${rejected} rejected as datacenter` : '') + '.'
+    );
   }
 
   report.working = verified.length;
@@ -258,6 +293,7 @@ async function warmPool(target = 4, log = () => {}) {
     server: p.server,
     ip: p.ip,
     location: p.location,
+    org: p.org,
     ipVerified: p.ipVerified,
   }));
   return report;
