@@ -213,6 +213,25 @@ async function getPostUrls(area, category, browser) {
   }
 }
 
+/**
+ * Reads the post's publish date as an ISO string, or null if absent.
+ *
+ * The page carries several identical `time.date.timeago` elements — the post
+ * date appears twice and the last one is "updated" — so pick by the adjacent
+ * label rather than by position, which would silently return the edit date on
+ * any post that has been touched since publishing.
+ */
+async function readPostedDate(page) {
+  return page
+    .evaluate(() => {
+      const rows = [...document.querySelectorAll('.postinginfo')];
+      const posted = rows.find((r) => /^\s*posted:/i.test(r.textContent));
+      const el = (posted ?? document.body).querySelector('time[datetime]');
+      return el ? el.getAttribute('datetime') : null;
+    })
+    .catch(() => null);
+}
+
 async function processSinglePost(postUrl, page, area) {
   await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
   await page.waitForSelector(BODY_SELECTOR, { timeout: 10000 });
@@ -252,6 +271,7 @@ async function processSinglePost(postUrl, page, area) {
     area,
     name,
     url: postUrl,
+    postedAt: await readPostedDate(page),
     body,
     contacts,
     contactsAvailable: found > 0,

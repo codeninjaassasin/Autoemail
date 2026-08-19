@@ -10,9 +10,6 @@ const researchUrlsEl = document.getElementById('research-urls');
 const researchErrorsEl = document.getElementById('research-errors');
 const researchSubmitBtn = document.getElementById('research-submit-btn');
 const researchResultsEl = document.getElementById('research-results');
-const researchModalEl = document.getElementById('research-modal');
-const researchModalBodyEl = document.getElementById('research-modal-body');
-const researchModalCloseEl = document.getElementById('research-modal-close');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PROVIDER_LABELS = { google: 'Google', microsoft: 'Microsoft' };
@@ -264,51 +261,102 @@ function renderHarvestSummary(addedCount, duplicates, results) {
 }
 
 // ── Result rendering ─────────────────────────────────────────────
-function renderResearchResults(results) {
-  researchResultsEl.innerHTML  = '';
-  researchModalBodyEl.innerHTML = '';
+/** Renders an ISO timestamp as a short local date, plus how long ago it was. */
+function formatPosted(iso) {
+  if (!iso) return { text: '—', title: '' };
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { text: '—', title: String(iso) };
 
+  const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
+  // Age is the point of showing a date here — a listing from March is far
+  // less worth writing to than one from this morning.
+  const age = days <= 0 ? 'today' : days === 1 ? '1d ago' : `${days}d ago`;
+  const text = d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return { text: `${text} (${age})`, title: d.toLocaleString() };
+}
+
+function cell(row, html, opts = {}) {
+  const td = document.createElement('td');
+  td.innerHTML = html;
+  if (opts.muted) td.style.color = 'var(--muted)';
+  if (opts.title) td.title = opts.title;
+  td.style.padding = '0.5rem 0.6rem';
+  td.style.borderTop = '1px solid var(--border)';
+  td.style.verticalAlign = 'top';
+  row.appendChild(td);
+  return td;
+}
+
+function renderResearchResults(results) {
+  researchResultsEl.innerHTML = '';
+  if (results.length === 0) return;
+
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.85rem;';
+
+  const thead = document.createElement('thead');
+  const hrow = document.createElement('tr');
+  for (const label of ['Title', 'Recipient (mail)', 'Recipient (phone)', 'Posted']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    th.style.cssText =
+      'text-align:left;padding:0.5rem 0.6rem;font-size:0.75rem;text-transform:uppercase;' +
+      'letter-spacing:0.04em;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap;';
+    hrow.appendChild(th);
+  }
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
   for (const item of results) {
-    // Summary row
-    const row = document.createElement('div');
-    row.className = `result-row ${item.success ? 'success' : 'error'}`;
-    const found = [...(item.contacts?.emails ?? []), ...(item.contacts?.phones ?? [])];
+    const row = document.createElement('tr');
+
+    if (!item.success) {
+      // An area that failed outright has no per-post fields to line up under
+      // the columns, so give it the full width rather than three empty cells.
+      const td = cell(row, `✗ ${escapeHtml(item.area ?? item.url ?? '?')} — ${escapeHtml(item.error ?? 'Unknown error')}`);
+      td.colSpan = 4;
+      td.style.color = 'var(--error)';
+      tbody.appendChild(row);
+      continue;
+    }
+
+    const emails = item.contacts?.emails ?? [];
+    const phones = item.contacts?.phones ?? [];
     // "Blocked" and "nothing published" both yield zero contacts but mean
     // opposite things — one is worth retrying, the other never will be.
-    const emptyReason = item.captchaBlocked ? 'blocked by CAPTCHA' : 'no contact in ad text';
-    row.textContent = item.success
-      ? `${found.length ? '✓' : '·'} [${item.area}] ${item.name ?? '(untitled)'} — ${found.length ? found.join(', ') : emptyReason}`
-      : `✗ ${item.url ?? item.area ?? '?'} — ${item.error}`;
-    researchResultsEl.appendChild(row);
+    const emptyReason = item.captchaBlocked ? 'blocked by CAPTCHA' : 'none in ad text';
 
-    // Modal card
-    const card = document.createElement('div');
-    card.className = 'modal-card';
-    if (item.success) {
-      const emails = item.contacts?.emails ?? [];
-      const phones = item.contacts?.phones ?? [];
-      card.innerHTML = `
-        <h4>${escapeHtml(item.name ?? '(untitled)')}</h4>
-        <div class="modal-meta">
-          <strong>Area:</strong> ${escapeHtml(item.area || '—')}<br>
-          <strong>URL:</strong> <a href="${safeUrl(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.url)}</a><br>
-          <strong>Email:</strong> ${emails.length ? escapeHtml(emails.join(', ')) : '—'}<br>
-          <strong>Phone:</strong> ${phones.length ? escapeHtml(phones.join(', ')) : '—'}<br>
-          ${item.contactNote ? `<em>${escapeHtml(item.contactNote)}</em>` : ''}
-        </div>`;
-    } else {
-      card.innerHTML = `
-        <h4 style="color:var(--error)">Error</h4>
-        <div class="modal-meta">
-          ${item.url ? `<strong>URL:</strong> ${escapeHtml(item.url)}<br>` : ''}
-          ${item.area ? `<strong>Area:</strong> ${escapeHtml(item.area)}<br>` : ''}
-          ${escapeHtml(item.error ?? 'Unknown error')}
-        </div>`;
-    }
-    researchModalBodyEl.appendChild(card);
+    cell(row,
+      `<a href="${safeUrl(item.url)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">` +
+      `${escapeHtml(item.name ?? '(untitled)')}</a>` +
+      `<div style="color:var(--muted);font-size:0.75rem;margin-top:0.15rem;">${escapeHtml(item.area || '')}</div>`
+    );
+
+    cell(row,
+      emails.length ? emails.map((e) => escapeHtml(e)).join('<br>') : emptyReason,
+      { muted: emails.length === 0 }
+    );
+
+    cell(row,
+      phones.length ? phones.map((p) => escapeHtml(p)).join('<br>') : '—',
+      { muted: phones.length === 0 }
+    );
+
+    const posted = formatPosted(item.postedAt);
+    cell(row, escapeHtml(posted.text), { muted: !item.postedAt, title: posted.title });
+
+    tbody.appendChild(row);
   }
 
-  if (results.length > 0) openResearchModal();
+  table.appendChild(tbody);
+
+  // Table can outgrow the panel on narrow windows; scroll it rather than the
+  // page.
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'overflow-x:auto;border:1px solid var(--border);border-radius:8px;';
+  wrap.appendChild(table);
+  researchResultsEl.appendChild(wrap);
 }
 
 // ── Modal open/close ─────────────────────────────────────────────
@@ -331,17 +379,5 @@ function safeUrl(value) {
     return '#';
   }
 }
-
-function openResearchModal() {
-  researchModalEl.classList.add('open');
-  researchModalEl.setAttribute('aria-hidden', 'false');
-}
-function closeResearchModal() {
-  researchModalEl.classList.remove('open');
-  researchModalEl.setAttribute('aria-hidden', 'true');
-}
-researchModalCloseEl.addEventListener('click', closeResearchModal);
-researchModalEl.addEventListener('click', (e) => { if (e.target === researchModalEl) closeResearchModal(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeResearchModal(); });
 
 loadAccounts();
