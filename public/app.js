@@ -186,7 +186,7 @@ researchSubmitBtn.addEventListener('click', async () => {
     });
     const data = await res.json();
     const results = data.results ?? [{ success: false, error: data.error ?? 'Unknown error' }];
-    renderResearchResults(results);
+    renderResearchResults(results, data.proxyCheck);
     harvestEmails(results);
   } catch (err) {
     renderResearchResults([{ success: false, error: err.message }]);
@@ -280,6 +280,44 @@ function formatPosted(iso) {
  * rows. Counting posts per IP is the point: it shows whether rotation really
  * happened or the whole run went out through one address.
  */
+/** Pre-scrape proxy check readout: how many were probed, how many usable. */
+function renderProxyCheck(check) {
+  if (!check) return null;
+  const box = document.createElement('div');
+  box.style.cssText =
+    'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);' +
+    'border-radius:8px;font-size:0.8rem;background:var(--bg);';
+
+  if (check.error) {
+    box.style.color = 'var(--error)';
+    box.textContent = `Proxy check failed: ${check.error}`;
+    return box;
+  }
+
+  const secs = check.elapsedMs ? ` in ${(check.elapsedMs / 1000).toFixed(0)}s` : '';
+  const head = document.createElement('div');
+  head.innerHTML =
+    `Proxy check — probed <strong>${check.checked}</strong> of ${check.listSize}${secs}, ` +
+    `<strong>${check.working}</strong> usable`;
+  head.style.color = check.working > 0 ? 'var(--success, #1a8a4a)' : 'var(--error)';
+  box.appendChild(head);
+
+  if (check.working === 0) {
+    const warn = document.createElement('div');
+    warn.style.cssText = 'color:var(--error);margin-top:0.25rem;';
+    warn.textContent = 'No usable proxy — this run went out on your own IP, unrotated.';
+    box.appendChild(warn);
+  } else {
+    for (const p of check.proxies) {
+      const line = document.createElement('div');
+      line.style.color = 'var(--muted)';
+      line.innerHTML = `<code>${escapeHtml(p.ip)}</code> — ${escapeHtml(p.location || 'Unknown')}`;
+      box.appendChild(line);
+    }
+  }
+  return box;
+}
+
 function renderExitSummary(results) {
   const byIp = new Map();
   for (const r of results) {
@@ -339,8 +377,12 @@ function cell(row, html, opts = {}) {
   return td;
 }
 
-function renderResearchResults(results) {
+function renderResearchResults(results, proxyCheck) {
   researchResultsEl.innerHTML = '';
+
+  const checkBox = renderProxyCheck(proxyCheck);
+  if (checkBox) researchResultsEl.appendChild(checkBox);
+
   if (results.length === 0) return;
 
   const table = document.createElement('table');

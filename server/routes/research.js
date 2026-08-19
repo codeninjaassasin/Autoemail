@@ -14,8 +14,11 @@ router.post('/scrape', async (req, res) => {
   const cleanCategory = String(category || 'jjj').trim();
 
   try {
-    const results = await scrapeAreas(cleanAreas, cleanCategory);
-    res.json({ results });
+    let proxyCheck = null;
+    const results = await scrapeAreas(cleanAreas, cleanCategory, {
+      onPreflight: (report) => { proxyCheck = report; },
+    });
+    res.json({ results, proxyCheck });
   } catch (err) {
     console.error('Scrape failed:', err);
     res.status(500).json({ error: err.message });

@@ -361,7 +361,34 @@ async function runPost(browser, url, area, exit) {
   }
 }
 
-async function scrapeAreas(areas = [], category = 'jjj') {
+async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
+  // Check proxies before touching Craigslist. A session that goes hunting
+  // mid-run stalls the scrape, and a run that can't rotate at all is worth
+  // knowing about now rather than discovering post by post.
+  let proxyCheck = null;
+  if (process.env.USE_PROXY !== '0') {
+    console.log('── Checking proxies before scraping ──');
+    const t0 = Date.now();
+    proxyCheck = await proxyPool.warmPool(MAX_SESSION_RESTARTS + 1, (m) => console.log(`   [proxy] ${m}`));
+    proxyCheck.elapsedMs = Date.now() - t0;
+
+    if (proxyCheck.working === 0) {
+      console.log(
+        `   [proxy] No usable proxy out of ${proxyCheck.checked} checked — ` +
+          'this run will go out on your own IP, unrotated.'
+      );
+    } else {
+      console.log(
+        `   [proxy] ${proxyCheck.working} usable proxy(s) ready ` +
+          `from ${proxyCheck.checked} checked in ${(proxyCheck.elapsedMs / 1000).toFixed(0)}s:`
+      );
+      for (const p of proxyCheck.proxies) console.log(`      · ${p.ip} — ${p.location}`);
+    }
+  }
+  // Hand the report back before the slow part begins, so a caller can show it
+  // without waiting for the scrape.
+  opts.onPreflight?.(proxyCheck);
+
   let { browser, exit } = await openSession();
   const results = [];
   const sessionsUsed = [{ ...exit, at: new Date().toISOString() }];

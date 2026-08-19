@@ -24,6 +24,9 @@ const LIST_TTL_MS = 10 * 60 * 1000;
 let cachedList = [];
 let cachedAt = 0;
 let cursor = 0;
+// Proxies already proven live by a preflight check, waiting to be handed to a
+// session. Draining this is what keeps a mid-run rotation instant.
+let verified = [];
 
 function shuffle(items) {
   const out = items.slice();
@@ -116,7 +119,62 @@ function validate(proxyUrl) {
  * this deliberately doesn't fall back to a direct connection on its own,
  * because that swap needs to be visible rather than silent.
  */
+/**
+ * Probes the list until `target` proxies have been proven live, and banks
+ * them for later sessions.
+ *
+ * Run before scraping starts: a session that has to go hunting mid-run stalls
+ * the scrape, and — more importantly — a run that can't rotate at all is worth
+ * knowing about before spending twenty minutes discovering it post by post.
+ *
+ * Returns a report even when it finds nothing; callers surface that rather
+ * than treating an empty pool as an error.
+ */
+async function warmPool(target = 4, log = () => {}) {
+  const report = { checked: 0, working: 0, target, proxies: [], listSize: 0, error: null };
+
+  let list;
+  try {
+    list = await fetchList();
+  } catch (err) {
+    report.error = err.message;
+    log(`Proxy list unavailable: ${err.message}`);
+    return report;
+  }
+  report.listSize = list.length;
+
+  while (verified.length < target && report.checked < MAX_CANDIDATES) {
+    if (cursor >= list.length) {
+      list = await fetchList(true).catch(() => list);
+      cursor = 0;
+      if (list.length === 0) break;
+    }
+    const batch = list.slice(cursor, cursor + PROBE_BATCH);
+    cursor += batch.length;
+    report.checked += batch.length;
+    if (batch.length === 0) break;
+
+    const live = (await Promise.all(batch.map((c) => validate(c)))).filter(Boolean);
+    verified.push(...live);
+    log(`Checked ${report.checked} — ${verified.length}/${target} usable so far.`);
+  }
+
+  report.working = verified.length;
+  report.proxies = verified.map((p) => ({ server: p.server, ip: p.ip, location: p.location }));
+  return report;
+}
+
 async function nextWorking(log = () => {}) {
+  // Spend a pre-checked proxy first — that's the whole point of checking.
+  if (verified.length > 0) {
+    const picked = verified.shift();
+    log(
+      `Using pre-checked proxy ${picked.server} — exit IP ${picked.ip} ` +
+        `(${picked.location}); ${verified.length} left in the pool.`
+    );
+    return picked;
+  }
+
   let list;
   try {
     list = await fetchList();
@@ -182,4 +240,4 @@ async function directIdentity() {
   }
 }
 
-module.exports = { nextWorking, directIdentity, validate, fetchList };
+module.exports = { warmPool, nextWorking, directIdentity, validate, fetchList };
