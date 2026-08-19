@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const proxyPool = require('./proxyPool');
 
 // ── Selectors — update these if Craigslist changes its markup ─────
 // Verified against live craigslist markup. The old per-subdomain search
@@ -285,15 +286,49 @@ async function processSinglePost(postUrl, page, area) {
   };
 }
 
-function launchBrowser() {
+/**
+ * Opens a browser and reports the exit IP it will present.
+ *
+ * A rotated IP is the point of the proxy, so which one we ended up on is
+ * recorded rather than assumed — a silent fall back to the direct connection
+ * would look identical to a working rotation while changing nothing about the
+ * block. Set USE_PROXY=0 to skip the pool entirely.
+ */
+async function openSession() {
+  let exit = { server: null, ip: 'unknown', location: 'Unknown', direct: true };
+
+  if (process.env.USE_PROXY !== '0') {
+    const picked = await proxyPool.nextWorking((msg) => console.log(`   [proxy] ${msg}`));
+    if (picked) {
+      exit = { ...picked, direct: false };
+    } else {
+      // Worth saying loudly: the run continues on the IP that was already
+      // being blocked.
+      console.log('   [proxy] Falling back to a DIRECT connection — no rotation this session.');
+      exit = { ...(await proxyPool.directIdentity()), direct: true };
+    }
+  } else {
+    exit = { ...(await proxyPool.directIdentity()), direct: true };
+  }
+
   // Visible by default so you can watch it work; set HEADLESS=1 to suppress.
-  return chromium.launch({ headless: process.env.HEADLESS === '1' });
+  const browser = await chromium.launch({
+    headless: process.env.HEADLESS === '1',
+    ...(exit.server ? { proxy: { server: exit.server } } : {}),
+  });
+
+  console.log(
+    `   [proxy] Session exit IP ${exit.ip} (${exit.location})` +
+      `${exit.direct ? ' — direct, no proxy' : ` via ${exit.server}`}`
+  );
+  return { browser, exit };
 }
 
 /**
- * Drops the flagged Chrome session and returns a fresh one. The new browser
- * starts with empty cookies and storage, which is what actually sheds the
- * CAPTCHA — reusing the old profile carries the flag straight over.
+ * Drops the flagged session and returns a fresh one — new browser and, where
+ * the pool can supply one, a new exit IP too. Empty cookies and storage are
+ * what shed a session-scoped CAPTCHA; a different IP is what sheds one scoped
+ * to the address.
  */
 async function restartSession(browser, area, attempt) {
   console.log(
@@ -305,26 +340,31 @@ async function restartSession(browser, area, attempt) {
   // either way.
   await browser.close().catch(() => {});
   await new Promise((resolve) => setTimeout(resolve, SESSION_COOLDOWN_MS));
-  return launchBrowser();
+  return openSession();
 }
 
-/** Runs one post on its own page, turning any failure into a result row. */
-async function runPost(browser, url, area) {
+/**
+ * Runs one post on its own page, turning any failure into a result row.
+ * `exit` is stamped on the row so each result records the IP it came through
+ * — sessions rotate mid-run, so this varies from row to row.
+ */
+async function runPost(browser, url, area, exit) {
   const page = await browser.newPage();
   try {
     const result = await processSinglePost(url, page, area);
-    return result ?? { url, area, success: false, error: 'No reply button or modal' };
+    return { ...(result ?? { url, area, success: false, error: 'No reply button or modal' }), exit };
   } catch (err) {
     console.error(`[${area}] Post failed: ${url}`, err.message);
-    return { url, area, success: false, error: err.message };
+    return { url, area, success: false, error: err.message, exit };
   } finally {
     await page.close().catch(() => {});
   }
 }
 
 async function scrapeAreas(areas = [], category = 'jjj') {
-  let browser = await launchBrowser();
+  let { browser, exit } = await openSession();
   const results = [];
+  const sessionsUsed = [{ ...exit, at: new Date().toISOString() }];
   let restarts = 0;
   let warnedExhausted = false;
 
@@ -342,12 +382,13 @@ async function scrapeAreas(areas = [], category = 'jjj') {
         // still pending. Retry the listing once on the clean browser.
         if (listing.challenged && restarts < MAX_SESSION_RESTARTS) {
           restarts += 1;
-          browser = await restartSession(browser, area, restarts);
+          ({ browser, exit } = await restartSession(browser, area, restarts));
+          sessionsUsed.push({ ...exit, at: new Date().toISOString() });
           listing = await getPostUrls(area, category, browser);
         }
       } catch (err) {
         console.error(`[${area}] Listing page failed:`, err.message);
-        results.push({ area, success: false, error: `Could not load listing page: ${err.message}` });
+        results.push({ area, success: false, error: `Could not load listing page: ${err.message}`, exit });
         continue;
       }
 
@@ -359,6 +400,7 @@ async function scrapeAreas(areas = [], category = 'jjj') {
           success: false,
           captchaBlocked: true,
           error: 'Craigslist served a CAPTCHA on the search page, so no listings could be read.',
+          exit,
         });
         continue;
       }
@@ -368,14 +410,14 @@ async function scrapeAreas(areas = [], category = 'jjj') {
       if (postUrls.length === 0) {
         // Without this the area contributes no rows at all and the UI shows
         // an empty result set that looks like success.
-        results.push({ area, success: false, error: 'No listings found for this area/category.' });
+        results.push({ area, success: false, error: 'No listings found for this area/category.', exit });
         continue;
       }
 
       // Step 2: process each post
       for (let i = 0; i < postUrls.length; i += 1) {
         const url = postUrls[i];
-        let result = await runPost(browser, url, area);
+        let result = await runPost(browser, url, area, exit);
 
         // Only worth relaunching while posts remain — either later in this
         // area or in one we haven't started. A CAPTCHA on the very last post
@@ -385,12 +427,13 @@ async function scrapeAreas(areas = [], category = 'jjj') {
         if (result.captchaBlocked && postsRemain) {
           if (restarts < MAX_SESSION_RESTARTS) {
             restarts += 1;
-            browser = await restartSession(browser, area, restarts);
+            ({ browser, exit } = await restartSession(browser, area, restarts));
+            sessionsUsed.push({ ...exit, at: new Date().toISOString() });
             // Retry the blocked post on the clean session — otherwise its
             // contact details stay lost even though the restart cleared the
             // block for everything after it. Keep the original row if the
             // retry is challenged too, so the CAPTCHA stays reported.
-            const retry = await runPost(browser, url, area);
+            const retry = await runPost(browser, url, area, exit);
             if (!retry.captchaBlocked) result = retry;
           } else if (!warnedExhausted) {
             warnedExhausted = true;
@@ -406,6 +449,13 @@ async function scrapeAreas(areas = [], category = 'jjj') {
     }
   } finally {
     await browser.close().catch(() => {});
+  }
+
+  // Every row already carries its own `exit`, so the return shape is
+  // unchanged; this is just the run-level readout.
+  console.log(`\n── Exit IPs used (${sessionsUsed.length} session(s)) ──`);
+  for (const [i, s] of sessionsUsed.entries()) {
+    console.log(`   ${i + 1}. ${s.ip} — ${s.location}${s.direct ? '  [DIRECT, no proxy]' : `  via ${s.server}`}`);
   }
 
   return results;

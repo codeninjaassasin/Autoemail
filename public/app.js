@@ -275,6 +275,58 @@ function formatPosted(iso) {
   return { text: `${text} (${age})`, title: d.toLocaleString() };
 }
 
+/**
+ * Run-level readout of which exit IPs were actually used, derived from the
+ * rows. Counting posts per IP is the point: it shows whether rotation really
+ * happened or the whole run went out through one address.
+ */
+function renderExitSummary(results) {
+  const byIp = new Map();
+  for (const r of results) {
+    const ip = r.exit?.ip;
+    if (!ip) continue;
+    if (!byIp.has(ip)) byIp.set(ip, { ...r.exit, count: 0 });
+    byIp.get(ip).count += 1;
+  }
+
+  const box = document.createElement('div');
+  box.style.cssText =
+    'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);' +
+    'border-radius:8px;font-size:0.8rem;background:var(--bg);';
+
+  if (byIp.size === 0) {
+    box.style.color = 'var(--muted)';
+    box.textContent = 'No exit IP recorded for this run.';
+    return box;
+  }
+
+  const anyDirect = [...byIp.values()].some((e) => e.direct);
+  const head = document.createElement('div');
+  head.style.cssText = 'color:var(--muted);margin-bottom:0.35rem;';
+  head.textContent = `Exit IPs used — ${byIp.size} address${byIp.size === 1 ? '' : 'es'} across ${results.length} row${results.length === 1 ? '' : 's'}`;
+  box.appendChild(head);
+
+  for (const e of byIp.values()) {
+    const line = document.createElement('div');
+    line.innerHTML =
+      `<code>${escapeHtml(e.ip)}</code> — ${escapeHtml(e.location || 'Unknown')} ` +
+      `<span style="color:var(--muted)">(${e.count} post${e.count === 1 ? '' : 's'})</span>` +
+      (e.direct
+        ? ' <span style="color:var(--error)">direct — no proxy</span>'
+        : ` <span style="color:var(--muted)">via ${escapeHtml(e.server || '')}</span>`);
+    box.appendChild(line);
+  }
+
+  if (anyDirect) {
+    const warn = document.createElement('div');
+    warn.style.cssText = 'color:var(--error);margin-top:0.35rem;';
+    warn.textContent =
+      'Some rows went out on the direct connection — no working proxy was available, so those were not rotated.';
+    box.appendChild(warn);
+  }
+  return box;
+}
+
 function cell(row, html, opts = {}) {
   const td = document.createElement('td');
   td.innerHTML = html;
@@ -292,11 +344,13 @@ function renderResearchResults(results) {
   if (results.length === 0) return;
 
   const table = document.createElement('table');
-  table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.85rem;';
+  // Six columns squeeze the title into a narrow ribbon at panel width; a floor
+  // keeps them readable and lets the wrapper scroll instead.
+  table.style.cssText = 'width:100%;min-width:820px;border-collapse:collapse;font-size:0.85rem;';
 
   const thead = document.createElement('thead');
   const hrow = document.createElement('tr');
-  for (const label of ['Title', 'Recipient (mail)', 'Recipient (phone)', 'Posted']) {
+  for (const label of ['Title', 'Recipient (mail)', 'Recipient (phone)', 'Posted', 'Exit IP', 'Location']) {
     const th = document.createElement('th');
     th.textContent = label;
     th.style.cssText =
@@ -315,7 +369,7 @@ function renderResearchResults(results) {
       // An area that failed outright has no per-post fields to line up under
       // the columns, so give it the full width rather than three empty cells.
       const td = cell(row, `✗ ${escapeHtml(item.area ?? item.url ?? '?')} — ${escapeHtml(item.error ?? 'Unknown error')}`);
-      td.colSpan = 4;
+      td.colSpan = 6;
       td.style.color = 'var(--error)';
       tbody.appendChild(row);
       continue;
@@ -346,10 +400,21 @@ function renderResearchResults(results) {
     const posted = formatPosted(item.postedAt);
     cell(row, escapeHtml(posted.text), { muted: !item.postedAt, title: posted.title });
 
+    // Sessions rotate mid-run, so this is per-row rather than per-run. A
+    // direct row is called out: it means no rotation happened for that post.
+    const exit = item.exit;
+    cell(row,
+      exit?.ip ? escapeHtml(exit.ip) + (exit.direct ? ' <span style="color:var(--error)">(direct)</span>' : '') : '—',
+      { muted: !exit?.ip, title: exit?.server || (exit?.direct ? 'No proxy — direct connection' : '') }
+    );
+    cell(row, escapeHtml(exit?.location ?? '—'), { muted: !exit?.location });
+
     tbody.appendChild(row);
   }
 
   table.appendChild(tbody);
+
+  researchResultsEl.appendChild(renderExitSummary(results));
 
   // Table can outgrow the panel on narrow windows; scroll it rather than the
   // page.
