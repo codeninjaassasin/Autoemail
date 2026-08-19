@@ -43,13 +43,33 @@ const entries = [];
 // newest holding a dead key. The key is not tied to a server, though — the
 // newest one authenticates against every endpoint — so take it from the most
 // recently written config and pair it with each server's own peer block.
-const newest = files
-  .map((f) => ({ f, mtime: fs.statSync(path.join(CONF_DIR, f)).mtimeMs }))
-  .sort((a, b) => b.mtime - a.mtime)[0].f;
-const newestText = fs.readFileSync(path.join(CONF_DIR, newest), 'utf8');
-const ACCOUNT_KEY = field(newestText, 'PrivateKey');
-const ACCOUNT_ADDRESS = field(newestText, 'Address');
-console.log(`Using the client key from ${newest} (most recent) for all tunnels.\n`);
+// Surfshark also hands out templates with the key field left as a
+// placeholder. Those look newest by timestamp and would replace a working key
+// with something that isn't base64, taking every tunnel down at once — so
+// only a real key counts as a candidate.
+const isRealKey = (k) => /^[A-Za-z0-9+/]{42,43}=$/.test(k);
+
+const candidates = files
+  .map((f) => {
+    const text = fs.readFileSync(path.join(CONF_DIR, f), 'utf8');
+    return { f, text, key: field(text, 'PrivateKey'), mtime: fs.statSync(path.join(CONF_DIR, f)).mtimeMs };
+  })
+  .filter((c) => isRealKey(c.key))
+  .sort((a, b) => b.mtime - a.mtime);
+
+const skipped = files.length - candidates.length;
+if (candidates.length === 0) {
+  console.error('No config contains a usable private key — every one is a placeholder.');
+  console.error('In the Surfshark dashboard, generate a key pair and download configs that include it.');
+  process.exit(1);
+}
+
+const ACCOUNT_KEY = candidates[0].key;
+const ACCOUNT_ADDRESS = field(candidates[0].text, 'Address');
+if (skipped > 0) {
+  console.log(`Ignored ${skipped} config(s) with a placeholder key (no key filled in).`);
+}
+console.log(`Using the client key from ${candidates[0].f} (most recent real key) for all tunnels.\n`);
 
 files.forEach((file, i) => {
   const text = fs.readFileSync(path.join(CONF_DIR, file), 'utf8');
