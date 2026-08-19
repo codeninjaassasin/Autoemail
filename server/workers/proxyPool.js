@@ -27,6 +27,10 @@ const BROWSER_UA =
 // scraper will.
 const GEO_HOST = 'ipinfo.io';
 const GEO_PATH = '/json';
+// Smallest possible response, for the one request that has to cross the
+// tunnel. Everything else is asked directly.
+const ECHO_HOST = 'api.ipify.org';
+const ECHO_PATH = '/?format=json';
 // The host the scraper actually needs to reach; reachability is proven against
 // this and nothing else.
 const TARGET_HOST = process.env.PROXY_TARGET_HOST || 'www.craigslist.org';
@@ -309,22 +313,20 @@ function validate(proxyUrl) {
   // it over a missing label would throw away the thing we were looking for.
   return Promise.all([
     tunnelFetch(proxyUrl, TARGET_HOST, '/'),
-    tunnelFetch(proxyUrl, GEO_HOST, GEO_PATH),
+    // A bare echo rather than the geo service: it answers in a fraction of the
+    // bytes, which is the difference between reading an exit IP through a
+    // slow tunnel and timing out. Location is looked up afterwards, directly.
+    tunnelFetch(proxyUrl, ECHO_HOST, ECHO_PATH),
   ]).then(async ([reach, ident]) => {
     if (!reach || !/^HTTP\/[\d.]+ \d{3}/.test(reach)) return null;
 
     const ip = ident ? field(ident, 'ip') : '';
     if (ip) {
-      return {
-        server: proxyUrl,
-        ip,
-        ipVerified: true,
-        org: field(ident, 'org'),
-        location:
-          [field(ident, 'city'), field(ident, 'region'), field(ident, 'country')]
-            .filter(Boolean)
-            .join(', ') || 'Unknown',
-      };
+      // Geolocated from here rather than through the tunnel: the exit IP is
+      // already known, and asking the slow path for something the fast path
+      // can answer is what made these lookups fail.
+      const info = await geoOf(ip);
+      return { server: proxyUrl, ip, ipVerified: true, org: info.org, location: info.location };
     }
 
     // Many of these proxies only permit certain destinations, so the echo
@@ -436,6 +438,13 @@ async function warmPoolUncoordinated(target, log) {
   // two hundred times just burns the timeout budget.
   const budget = usingStaticProxies() ? list.length : MAX_CANDIDATES;
 
+  // The cursor persists for the life of the process, which is right for a
+  // scraped list of a thousand but wrong for a fixed one: the second scrape in
+  // the same server found the cursor already at the end and reported "probed 0
+  // of 8, 0 usable" while the tunnels were all healthy. A fixed list is short
+  // enough to walk again.
+  if (usingStaticProxies() && cursor >= list.length) cursor = 0;
+
   while (verified.length < target && report.checked < budget) {
     if (cursor >= list.length) {
       if (usingStaticProxies()) break;
@@ -460,8 +469,15 @@ async function warmPoolUncoordinated(target, log) {
         continue;
       }
       // Several entries often share a host on different ports. Rotating onto
-      // an address we're already using isn't a rotation, so keep one per IP.
-      if (!verified.some((v) => v.ip === p.ip)) verified.push(p);
+      // an address we're already using isn't a rotation, so keep one per IP —
+      // but only when the IP is actually known. Eight local tunnels whose exit
+      // couldn't be read all report "unknown", and deduping on that collapsed
+      // every one of them into the first, so a run that had eight exits
+      // available used one and burned it.
+      const dupe = verified.some((v) =>
+        p.ip && p.ip !== 'unknown' ? v.ip === p.ip : v.server === p.server
+      );
+      if (!dupe) verified.push(p);
     }
 
     log(
