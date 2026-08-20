@@ -631,6 +631,22 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
       }
       continue;
     }
+    // Anything that didn't produce a usable read gets another exit. Retrying
+    // was keyed on the error text looking like a network failure, so a post
+    // that timed out waiting for its body — not a phrase isSessionFailure
+    // matches — was written off after one attempt with its retries unspent.
+    // Whether a failure is worth another address doesn't depend on how the
+    // error was worded.
+    if (!result.success) {
+      if (attempt < attemptsAllowed) {
+        console.log(
+          `   [${area}] Failed on ${exit.ip} (${String(result.error).split('\n')[0].slice(0, 45)})` +
+            ' — retrying on another exit.'
+        );
+      }
+      continue;
+    }
+
     // The panel failed to render and we couldn't confirm why. Worth another
     // exit, but not worth striking this one: a strike on a guess would bench
     // healthy tunnels.
