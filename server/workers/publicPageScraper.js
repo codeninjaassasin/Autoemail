@@ -286,10 +286,17 @@ async function readReplyPanel(page, area) {
     // widget is injected a beat after the panel fails, so give it a moment to
     // appear rather than asking too early and recording the wrong cause.
     if (!out.challenged) out.challenged = await looksChallenged(page);
+    // A panel that didn't render and no challenge we could see. The panel is
+    // gated behind hCaptcha, so this is almost always a challenge the
+    // detectors missed rather than a post with nothing to show — the /init
+    // sniff needs the response body in time, and the widget markup needs to
+    // have rendered before we look. Flagged so the caller retries on another
+    // exit instead of accepting "no contact" from a read that never happened.
+    out.panelUnavailable = !out.challenged;
     console.log(
       out.challenged
         ? `   [${area}] Craigslist served a CAPTCHA — contact details withheld.`
-        : `   [${area}] Reply panel didn't open.`
+        : `   [${area}] Reply panel didn't open — treating as blocked.`
     );
     return out;
   } finally {
@@ -434,6 +441,7 @@ async function processSinglePost(postUrl, page, area) {
     contacts,
     contactsAvailable: found > 0,
     captchaBlocked: viaReply.challenged,
+    panelUnavailable: Boolean(viaReply.panelUnavailable),
     contactNote: viaReply.challenged
       ? 'Craigslist served a CAPTCHA, so the reply address could not be read. Slow down or open the listing manually.'
       : found > 0
@@ -534,6 +542,27 @@ async function sessionFor(exit) {
   });
   await context.addInitScript(STEALTH_INIT);
 
+  // Arrive at the site before arriving at a post.
+  //
+  // Reusing a context only helps the one exit that happened to fetch a
+  // listing; every other exit's first navigation was a post page with an
+  // empty cookie jar, which is the condition that gets challenged. With a
+  // handful of exits enough of them were warmed by listing fetches to
+  // partly mask it — with two dozen, almost every session started cold and
+  // essentially every post was challenged.
+  //
+  // Cost is one extra page load per exit, once, for the whole run.
+  const warm = await context.newPage();
+  try {
+    await warm.goto('https://www.craigslist.org/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await warm.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
+  } catch {
+    // A tunnel too slow to load the homepage will fail on posts too; let the
+    // post attempt report it rather than failing here.
+  } finally {
+    await warm.close().catch(() => {});
+  }
+
   const session = { browser, context, exit };
   liveSessions.set(key, session);
   return session;
@@ -599,6 +628,15 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
           `   [proxy] Dropped ${exit.ip} from the pool ` +
             `(${proxyPool.size()} left): ${result.error.split('\n')[0].slice(0, 50)}`
         );
+      }
+      continue;
+    }
+    // The panel failed to render and we couldn't confirm why. Worth another
+    // exit, but not worth striking this one: a strike on a guess would bench
+    // healthy tunnels.
+    if (result.panelUnavailable && !result.captchaBlocked) {
+      if (attempt < attemptsAllowed) {
+        console.log(`   [${area}] Reply panel unavailable — retrying on another exit.`);
       }
       continue;
     }
