@@ -105,7 +105,7 @@ const MAX_SESSION_RESTARTS = 3;
 // Every post gets its own browser on its own proxy. Attempts here are per
 // post, not per run: a CAPTCHA or a dead proxy costs this post a retry on the
 // next address and nothing more, so the run still reaches the full count.
-const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 3);
+const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 5);
 const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
 // Off by default: a run set up to rotate should not quietly stop rotating.
 const ALLOW_DIRECT_FALLBACK = process.env.ALLOW_DIRECT_FALLBACK === '1';
@@ -459,7 +459,7 @@ async function processSinglePost(postUrl, page, area) {
  * would look identical to a working rotation while changing nothing about the
  * block. Set USE_PROXY=0 to skip the pool entirely.
  */
-async function pickExit() {
+async function pickExit(exclude = null) {
   let exit = { server: null, ip: 'unknown', location: 'Unknown', direct: true };
   let cached = null;
 
@@ -467,7 +467,7 @@ async function pickExit() {
     // Round-robin, not consume: the pool is nearly always smaller than the
     // number of posts, so entries have to come back around. This can block —
     // the pool rests each address between uses.
-    const picked = await proxyPool.next();
+    const picked = await proxyPool.next({ exclude });
     if (picked) {
       if (picked.waitedMs > 0) {
         console.log(`   [proxy] Waited ${(picked.waitedMs / 1000).toFixed(0)}s for ${picked.ip} to cool down.`);
@@ -596,15 +596,20 @@ async function retireAllSessions() {
  */
 async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
   let last = null;
+  // Each attempt for this post goes out on an address the post hasn't used.
+  const tried = new Set();
 
   for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
-    const exit = await pickExit();
+    const exit = await pickExit(tried);
+    if (exit?.server) tried.add(exit.server);
     if (!exit) {
       // Every tunnel is resting. Report it against the post rather than
       // pretending it was scraped and found nothing.
       last = {
         url, area, success: false,
-        error: 'All tunnels were resting — no rotated exit available for this post.',
+        error: tried.size
+          ? `No untried exit available after ${tried.size} attempt(s).`
+          : 'All tunnels were resting — no rotated exit available for this post.',
         exit: { server: null, ip: 'none', location: 'No tunnel available', direct: false },
       };
       break;
@@ -756,9 +761,13 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     // it's worth walking several addresses before giving up on it.
     let listing = null;
     let listingError = null;
+    // Same rule as posts: each attempt at this listing uses an address the
+    // listing hasn't already failed on.
+    const triedForListing = new Set();
 
     for (let attempt = 1; attempt <= LISTING_ATTEMPTS; attempt += 1) {
-      const exit = await pickExit();
+      const exit = await pickExit(triedForListing);
+      if (exit?.server) triedForListing.add(exit.server);
       if (!exit) {
         listingError = 'All tunnels were resting — no rotated exit available.';
         listing = null;

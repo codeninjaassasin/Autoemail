@@ -298,14 +298,19 @@ async function warmPool(_target, log = () => {}) {
  * Reservation happens before the wait, so concurrent callers see the slot as
  * taken and spread across different tunnels rather than queueing on one.
  */
-async function next() {
-  if (verified.length === 0) return null;
+async function next({ exclude = null } = {}) {
+  // `exclude` holds the exits a single post has already tried. Retries landed
+  // on different addresses only because the one just used was still cooling —
+  // true whenever the pool is large, and false exactly when it isn't, which is
+  // when retrying elsewhere matters most.
+  const eligible = exclude ? verified.filter((p) => !exclude.has(p.server)) : verified;
+  if (eligible.length === 0) return null;
 
   const now = Date.now();
   let best = null;
   let bestReady = Infinity;
-  for (let i = 0; i < verified.length; i += 1) {
-    const p = verified[(ring + i) % verified.length];
+  for (let i = 0; i < eligible.length; i += 1) {
+    const p = eligible[(ring + i) % eligible.length];
     // Eligible once it has both rested since its last use and served out any
     // penalty from being challenged.
     const ready = Math.max(
