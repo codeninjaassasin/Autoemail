@@ -92,7 +92,20 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify(payload),
     });
     const data = await res.json();
-    renderResults(data.results || [{ recipient: '(request)', success: false, error: data.error || 'Unknown error' }]);
+    const rows = data.results || [{ recipient: '(request)', success: false, error: data.error || 'Unknown error' }];
+    renderResults(rows);
+
+    // Drop the ones that became drafts. Leaving them selected would send a
+    // second draft to the same person on the next click, and the table is the
+    // recipient list — so what's left in it is what still needs writing to.
+    const drafted = rows.filter((r) => r.success).map((r) => String(r.recipient).toLowerCase());
+    for (const e of drafted) draftedEmails.add(e);
+    if (drafted.length) {
+      lastResults = lastResults.filter(
+        (r) => !isDrafted(r.contacts?.emails ?? [])
+      );
+      renderResearchResults(lastResults, lastProxyCheck, lastProgress);
+    }
   } catch (err) {
     renderResults([{ recipient: '(request)', success: false, error: err.message }]);
   } finally {
@@ -346,7 +359,14 @@ function cell(row, html, opts = {}) {
   return td;
 }
 
+let lastResults = [];
+let lastProxyCheck = null;
+let lastProgress = null;
+
 function renderResearchResults(results, proxyCheck, progress = null) {
+  lastResults = results;
+  lastProxyCheck = proxyCheck;
+  lastProgress = progress;
   researchResultsEl.innerHTML = '';
 
   const checkBox = renderProxyCheck(proxyCheck);
@@ -359,7 +379,12 @@ function renderResearchResults(results, proxyCheck, progress = null) {
   // nor a phone has nothing to act on, and this table is the recipient list
   // now — not a log of everything the scrape touched.
   const contactable = results.filter(
-    (r) => r.success && ((r.contacts?.emails?.length ?? 0) > 0 || (r.contacts?.phones?.length ?? 0) > 0)
+    (r) =>
+      r.success &&
+      ((r.contacts?.emails?.length ?? 0) > 0 || (r.contacts?.phones?.length ?? 0) > 0) &&
+      // Drafted rows leave the list: their addresses have been written to, and
+      // leaving them in invites a second draft to the same person.
+      !isDrafted(r.contacts?.emails ?? [])
   );
 
   const skipped = results.length - contactable.length;
@@ -405,11 +430,19 @@ function renderResearchResults(results, proxyCheck, progress = null) {
     pick.style.cssText = 'padding:0.5rem 0.6rem;border-top:1px solid var(--border);vertical-align:top;';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = emails.length > 0;
+    // Default on, unless this row was deliberately unticked earlier — a
+    // redraw must not re-select something the user removed.
+    cb.checked = emails.length > 0 && !emails.some((e) => untickedEmails.has(e.toLowerCase()));
     cb.disabled = emails.length === 0;
     cb.dataset.emails = emails.join(',');
     cb.title = item.name || '';
-    cb.addEventListener('change', updateRecipientSummary);
+    cb.addEventListener('change', () => {
+      for (const e of emails) {
+        if (cb.checked) untickedEmails.delete(e.toLowerCase());
+        else untickedEmails.add(e.toLowerCase());
+      }
+      updateRecipientSummary();
+    });
     pick.appendChild(cb);
     row.appendChild(pick);
 
@@ -438,6 +471,16 @@ function renderResearchResults(results, proxyCheck, progress = null) {
   researchResultsEl.appendChild(wrap);
 
   updateRecipientSummary();
+}
+
+// The table is rebuilt on every poll while a scrape streams in, so tick state
+// and already-drafted rows have to live outside it — otherwise a redraw two
+// seconds later would silently undo the user's selection.
+const untickedEmails = new Set();
+const draftedEmails = new Set();
+
+function isDrafted(emails) {
+  return emails.length > 0 && emails.every((e) => draftedEmails.has(e.toLowerCase()));
 }
 
 /** Progress line for a run that is still going, or its final tally. */
