@@ -753,6 +753,14 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       : ALL_CATEGORIES;
 
   for (const area of areas) {
+   // Listings for every section are gathered first, then their posts are
+   // interleaved. Draining one section before starting the next meant the bulk
+   // classifieds — for-sale and housing run to hundreds of posts — consumed the
+   // whole exit pool, and the sections further down the list were never
+   // reached at all. Interleaving gives every section coverage from the start,
+   // so a run that ends early ends with something from each.
+   const queued = [];
+
    for (const cat of categories) {
     const category = cat.code;
     const label = categories.length > 1 ? `${area}/${cat.name}` : area;
@@ -830,52 +838,67 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       continue;
     }
 
-    // Step 2: one post at a time, each on the next proxy in the rotation.
-    console.log(
-      `[${label}] Scraping ${listing.urls.length} posts, rotating proxies ` +
-        `(${proxyPool.size()} in the pool).`
-    );
-    opts.onCategory?.({ area, category, categoryName: cat.name, planned: listing.urls.length });
-
-    // Posts run concurrently. Each already carries its own proxy and browser,
-    // so overlapping them doesn't raise the request rate seen by any single
-    // address — which is what pacing exists to control. Sequential execution
-    // was leaving nearly all the wall-clock idle waiting on slow proxies.
-    const urls = listing.urls;
-    const rows = new Array(urls.length);
-    let cursor = 0;
-    let done = 0;
-
-    async function worker(slot) {
-      // Stagger the openings so the workers don't all hit Craigslist on the
-      // same instant, which would undo the pacing.
-      await sleep(slot * (paceDelay() / POST_CONCURRENCY));
-
-      while (true) {
-        const i = cursor;
-        cursor += 1;
-        if (i >= urls.length) return;
-
-        const row = await scrapePostWithRotation(urls[i], area, ATTEMPTS_PER_POST, noteSession);
-        // Carry the section through so a mixed run stays readable.
-        rows[i] = { ...row, category, categoryName: cat.name };
-        // Hand it over immediately: a long run is worth watching as it goes,
-        // not only once every category has finished.
-        opts.onRow?.(rows[i]);
-        done += 1;
-        console.log(`   [${label}] ${done}/${urls.length} done.`);
-
-        // Pace per worker, so the aggregate rate scales with concurrency
-        // rather than each worker sprinting.
-        if (cursor < urls.length && PACE_MAX_MS > 0) await sleep(paceDelay());
-      }
-    }
-
-    const workers = Math.min(POST_CONCURRENCY, urls.length);
-    console.log(`[${label}] Running ${workers} post(s) at a time.`);
-    await Promise.all(Array.from({ length: workers }, (_, s) => worker(s)));
-    results.push(...rows.filter(Boolean));
+    // Queued rather than scraped here — see the note above the loop.
+    for (const url of listing.urls) queued.push({ url, cat, category });
+    console.log(`[${label}] ${listing.urls.length} posts queued.`);
    }
+
+   if (queued.length === 0) continue;
+
+   // Interleave: one post from each section in turn, so coverage is spread
+   // rather than spent depth-first on whichever section happens to be biggest.
+   const byCat = new Map();
+   for (const item of queued) {
+     if (!byCat.has(item.category)) byCat.set(item.category, []);
+     byCat.get(item.category).push(item);
+   }
+   const lists = [...byCat.values()];
+   const urls = [];
+   for (let i = 0; urls.length < queued.length; i += 1) {
+     for (const list of lists) if (i < list.length) urls.push(list[i]);
+   }
+
+   console.log(
+     `[${area}] ${urls.length} posts across ${lists.length} section(s), interleaved ` +
+       `(${proxyPool.size()} exits in the pool).`
+   );
+   opts.onCategory?.({ area, category: 'all', categoryName: 'all sections', planned: urls.length });
+
+   const rows = new Array(urls.length);
+   let cursor = 0;
+   let done = 0;
+
+   async function worker(slot) {
+     // Stagger the openings so the workers don't all hit Craigslist on the
+     // same instant, which would undo the pacing.
+     await sleep(slot * (paceDelay() / POST_CONCURRENCY));
+
+     while (true) {
+       const i = cursor;
+       cursor += 1;
+       if (i >= urls.length) return;
+
+       const { url, cat, category } = urls[i];
+       const row = await scrapePostWithRotation(url, area, ATTEMPTS_PER_POST, noteSession);
+       rows[i] = { ...row, category, categoryName: cat.name };
+       // Hand it over immediately: a long run is worth watching as it goes,
+       // not only once every category has finished.
+       opts.onRow?.(rows[i]);
+       done += 1;
+       if (done % 10 === 0 || done === urls.length) {
+         console.log(`   [${area}] ${done}/${urls.length} done.`);
+       }
+
+       // Pace per worker, so the aggregate rate scales with concurrency
+       // rather than each worker sprinting.
+       if (cursor < urls.length && PACE_MAX_MS > 0) await sleep(paceDelay());
+     }
+   }
+
+   const workers = Math.min(POST_CONCURRENCY, urls.length);
+   console.log(`[${area}] Running ${workers} post(s) at a time.`);
+   await Promise.all(Array.from({ length: workers }, (_, s) => worker(s)));
+   results.push(...rows.filter(Boolean));
   }
 
   // Browsers are held open for the whole run now, so closing them is the
