@@ -153,7 +153,6 @@ areaInputEl.addEventListener('keydown', (e) => {
 
 // ── Research submit ──────────────────────────────────────────────
 researchSubmitBtn.addEventListener('click', async () => {
-  console.log('YES');
   researchErrorsEl.textContent  = '';
   researchResultsEl.innerHTML   = '';
 
@@ -176,8 +175,8 @@ researchSubmitBtn.addEventListener('click', async () => {
       }),
     });
     const data = await res.json();
-    const results = data.results ?? [{ success: false, error: data.error ?? 'Unknown error' }];
-    renderResearchResults(results, data.proxyCheck);
+    if (!data.jobId) throw new Error(data.error ?? 'Could not start the scrape.');
+    await followJob(data.jobId);
   } catch (err) {
     renderResearchResults([{ success: false, error: err.message }]);
   } finally {
@@ -185,6 +184,43 @@ researchSubmitBtn.addEventListener('click', async () => {
     researchSubmitBtn.textContent = 'Start Scraping';
   }
 });
+
+/**
+ * Polls a running scrape and redraws as rows land.
+ *
+ * An uncapped area is hundreds of listings, so the run outlives any single
+ * request — the table fills in progressively rather than appearing at the end,
+ * and closing the tab doesn't stop the job.
+ */
+async function followJob(jobId) {
+  let seen = -1;
+
+  for (;;) {
+    const res = await fetch(`/api/research/scrape/${jobId}`);
+    if (!res.ok) throw new Error((await res.json()).error ?? 'Lost track of the scrape.');
+    const job = await res.json();
+
+    // Redraw only when something changed; the table carries tick state, so
+    // needless redraws would clear selections the user has already made.
+    if (job.completed !== seen) {
+      seen = job.completed;
+      renderResearchResults(job.results, job.proxyCheck, {
+        status: job.status,
+        completed: job.completed,
+        planned: job.planned,
+        label: job.currentLabel,
+        elapsedMs: job.elapsedMs,
+      });
+    }
+
+    if (job.status !== 'running') {
+      if (job.status === 'failed') researchErrorsEl.textContent = job.error ?? 'Scrape failed.';
+      return;
+    }
+    researchSubmitBtn.textContent = `Scraping… ${job.completed}${job.planned ? `/${job.planned}` : ''}`;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
 
 // ── Result rendering ─────────────────────────────────────────────
 /** Renders an ISO timestamp as a short local date, plus how long ago it was. */
@@ -310,11 +346,14 @@ function cell(row, html, opts = {}) {
   return td;
 }
 
-function renderResearchResults(results, proxyCheck) {
+function renderResearchResults(results, proxyCheck, progress = null) {
   researchResultsEl.innerHTML = '';
 
   const checkBox = renderProxyCheck(proxyCheck);
   if (checkBox) researchResultsEl.appendChild(checkBox);
+
+  const bar = renderProgress(progress);
+  if (bar) researchResultsEl.appendChild(bar);
 
   // Only listings that can actually be contacted. A row with neither an email
   // nor a phone has nothing to act on, and this table is the recipient list
@@ -399,6 +438,27 @@ function renderResearchResults(results, proxyCheck) {
   researchResultsEl.appendChild(wrap);
 
   updateRecipientSummary();
+}
+
+/** Progress line for a run that is still going, or its final tally. */
+function renderProgress(p) {
+  if (!p) return null;
+  const el = document.createElement('div');
+  el.style.cssText =
+    'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);' +
+    'border-radius:8px;font-size:0.8rem;background:var(--bg);';
+  const secs = Math.round((p.elapsedMs ?? 0) / 1000);
+  const time = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
+
+  if (p.status === 'running') {
+    el.innerHTML =
+      `<strong>Scraping…</strong> ${p.completed}${p.planned ? ` of ${p.planned}` : ''} posts · ${time}` +
+      (p.label ? ` · <span style="color:var(--muted)">${escapeHtml(p.label)}</span>` : '');
+  } else {
+    el.style.color = 'var(--muted)';
+    el.innerHTML = `<strong>Finished</strong> — ${p.completed} posts in ${time}.`;
+  }
+  return el;
 }
 
 /** Every address ticked in the table — this is the recipient list. */

@@ -39,10 +39,11 @@ async function looksChallenged(page) {
   return CAPTCHA_TEXT_RE.test(text);
 }
 
-// A single search page serves ~300 results and each post costs several
-// seconds, so cap the work per area — the whole scrape runs inside one
-// HTTP request and will otherwise outlive any client timeout.
-const MAX_POSTS_PER_AREA = Number(process.env.MAX_POSTS_PER_AREA ?? 25);
+// Per area *and* per category. 0 means take everything the search returns —
+// safe now that a scrape runs as a background job rather than inside the
+// request that started it, which is what the old cap existed to protect.
+const RAW_MAX = Number(process.env.MAX_POSTS_PER_AREA ?? 0);
+const MAX_POSTS_PER_AREA = RAW_MAX > 0 ? RAW_MAX : Infinity;
 
 // Hitting posts back to back is a bot signal on its own, independent of which
 // address they come from — no human opens 25 listings in 90 seconds. The gap
@@ -834,6 +835,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
       `[${label}] Scraping ${listing.urls.length} posts, rotating proxies ` +
         `(${proxyPool.size()} in the pool).`
     );
+    opts.onCategory?.({ area, category, categoryName: cat.name, planned: listing.urls.length });
 
     // Posts run concurrently. Each already carries its own proxy and browser,
     // so overlapping them doesn't raise the request rate seen by any single
@@ -857,6 +859,9 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
         const row = await scrapePostWithRotation(urls[i], area, ATTEMPTS_PER_POST, noteSession);
         // Carry the section through so a mixed run stays readable.
         rows[i] = { ...row, category, categoryName: cat.name };
+        // Hand it over immediately: a long run is worth watching as it goes,
+        // not only once every category has finished.
+        opts.onRow?.(rows[i]);
         done += 1;
         console.log(`   [${label}] ${done}/${urls.length} done.`);
 
