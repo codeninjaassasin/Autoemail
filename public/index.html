@@ -199,9 +199,12 @@
         <div id="editor"></div>
       </div>
       <div class="field">
-        <label for="recipients">Sender list (recipients)</label>
-        <textarea id="recipients" placeholder="one@example.com, two@example.com&#10;three@example.com" required></textarea>
-        <div class="hint">One address per line, or comma-separated — both work.</div>
+        <label>Recipients</label>
+        <!-- The scraped table below is the recipient list; there is no second
+             copy to keep in sync. Untick a row to leave it out. -->
+        <div class="hint" id="recipient-summary">
+          Scrape below, then tick the rows you want. Selected addresses become the recipients.
+        </div>
         <div id="recipient-errors" class="validation-errors"></div>
       </div>
       <button type="submit" id="submit-btn">Create Drafts</button>
@@ -268,7 +271,6 @@
   </div>
 
   <div id="research-errors" style="color:var(--error);font-size:0.875rem;margin-top:0.5rem;"></div>
-  <div id="research-harvest" style="font-size:0.85rem;margin-top:0.5rem;"></div>
   <div id="research-results" style="margin-top:0.75rem;display:flex;flex-direction:column;gap:0.4rem;"></div>
 </section>
 </main>

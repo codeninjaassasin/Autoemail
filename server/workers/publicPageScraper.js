@@ -107,13 +107,6 @@ const MAX_SESSION_RESTARTS = 3;
 // next address and nothing more, so the run still reaches the full count.
 const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 3);
 const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
-// Free proxies die constantly, so the pool is refilled once it thins out —
-// otherwise a long run ends up cycling the last one or two survivors, which
-// is no longer rotation.
-const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 8);
-const POOL_READY = Number(process.env.PROXY_POOL_READY ?? 3);
-const MIN_POOL_SIZE = Number(process.env.PROXY_POOL_MIN ?? 3);
-const TOP_UP_BACKOFF_POSTS = Number(process.env.PROXY_TOPUP_BACKOFF ?? 5);
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -177,6 +170,33 @@ function deobfuscate(text) {
   return text.replace(AT_RE, '@').replace(DOT_RE, '.');
 }
 
+// Shared company mailboxes rather than a person. A draft to jobs@ or info@
+// lands in a queue somebody triages, which is the opposite of what this list
+// is for — so they're kept, but kept separate.
+const ROLE_MAILBOXES = new Set([
+  'jobs', 'job', 'hiring', 'hire', 'recruiting', 'recruiter', 'recruitment',
+  'careers', 'career', 'hr', 'humanresources', 'staffing', 'talent',
+  'info', 'information', 'contact', 'contactus', 'admin', 'administrator',
+  'office', 'team', 'support', 'help', 'helpdesk', 'service', 'services',
+  'sales', 'marketing', 'billing', 'accounts', 'accounting', 'invoices',
+  'inquiries', 'enquiries', 'inquiry', 'enquiry', 'general',
+  'noreply', 'no-reply', 'donotreply', 'mail', 'email', 'webmaster',
+  'hello', 'hey', 'inbox', 'reception', 'frontdesk', 'apply', 'applications',
+  'resume', 'resumes', 'cv', 'work', 'employment', 'manager', 'management',
+]);
+
+/**
+ * True when the address is a shared company mailbox rather than a person.
+ *
+ * Craigslist relays are per-post and reach the individual who posted, so they
+ * count as personal however opaque the local part looks.
+ */
+function isRoleMailbox(email) {
+  if (/@(?:reply|res|job)\.craigslist\.org$/i.test(email)) return false;
+  const local = email.split('@')[0].toLowerCase().replace(/[._-]/g, '');
+  return ROLE_MAILBOXES.has(local);
+}
+
 const PROSE_BEFORE_AT = new Set([
   'out', 'back', 'here', 'there', 'now', 'today', 'available', 'located',
   'based', 'located', 'working', 'work', 'apply', 'arrive', 'meet', 'look',
@@ -193,7 +213,7 @@ function extractContacts(body) {
   // applies only to ones deobfuscation invented, so a real `apply@corp.com`
   // survives while "apply at corp.com" prose does not.
   const literal = new Set(stripped.match(EMAIL_RE) || []);
-  const emails = [...new Set([...literal, ...(text.match(EMAIL_RE) || [])])]
+  const found = [...new Set([...literal, ...(text.match(EMAIL_RE) || [])])]
     // Body-text relays are redundant; we read the canonical one off the
     // reply panel instead.
     .filter((e) => !/craigslist\.org$/i.test(e))
@@ -203,8 +223,16 @@ function extractContacts(body) {
     // harvest, feeding a draft to a mailbox that doesn't exist.
     .filter((e) => !/@www\./i.test(e))
     .filter((e) => literal.has(e) || !PROSE_BEFORE_AT.has(e.split('@')[0].toLowerCase()));
+
+  // Split rather than discard: a shared company mailbox is still a real
+  // address and worth seeing, it just shouldn't be treated as a person to
+  // write to. Only `emails` feeds the recipient list.
   const phones = [...new Set((text.match(PHONE_RE) || []).map((p) => p.trim()))];
-  return { emails, phones };
+  return {
+    emails: found.filter((e) => !isRoleMailbox(e)),
+    roleEmails: found.filter(isRoleMailbox),
+    phones,
+  };
 }
 
 /**
@@ -384,7 +412,10 @@ async function processSinglePost(postUrl, page, area) {
 
   // (b) Craigslist's own reply panel, which yields a per-post relay address.
   const viaReply = await readReplyPanel(page, area);
-  for (const e of viaReply.emails) if (!contacts.emails.includes(e)) contacts.emails.push(e);
+  for (const e of viaReply.emails) {
+    const bucket = isRoleMailbox(e) ? contacts.roleEmails : contacts.emails;
+    if (!bucket.includes(e)) bucket.push(e);
+  }
   for (const ph of viaReply.phones) if (!contacts.phones.includes(ph)) contacts.phones.push(ph);
 
   const found = contacts.emails.length + contacts.phones.length;
@@ -426,8 +457,7 @@ async function pickExit() {
     // Round-robin, not consume: the pool is nearly always smaller than the
     // number of posts, so entries have to come back around. This can block —
     // the pool rests each address between uses.
-    const picked =
-      (await proxyPool.next()) || (await proxyPool.nextWorking((m) => console.log(`   [proxy] ${m}`)));
+    const picked = await proxyPool.next();
     if (picked) {
       if (picked.waitedMs > 0) {
         console.log(`   [proxy] Waited ${(picked.waitedMs / 1000).toFixed(0)}s for ${picked.ip} to cool down.`);
@@ -602,13 +632,10 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   if (process.env.USE_PROXY !== '0') {
     console.log('── Checking proxies before scraping ──');
     const t0 = Date.now();
-    // Only enough to start. Probing all the way to POOL_TARGET was the single
-    // largest remaining cost in a run, and the scrape doesn't need a full pool
-    // on the first post — it needs one working proxy and more arriving.
-    proxyCheck = await proxyPool.warmPool(POOL_READY, (m) => console.log(`   [proxy] ${m}`));
+    // The tunnels are a fixed, local set, so all of them are checked at once
+    // and that's the whole pool — there is nothing more to discover later.
+    proxyCheck = await proxyPool.warmPool(undefined, (m) => console.log(`   [proxy] ${m}`));
     proxyCheck.elapsedMs = Date.now() - t0;
-    proxyCheck.ready = POOL_READY;
-    proxyCheck.target = POOL_TARGET;
 
     if (proxyCheck.working === 0) {
       console.log(
@@ -627,47 +654,10 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   // without waiting for the scrape.
   opts.onPreflight?.(proxyCheck);
 
-  // Keep filling to the full target while the scrape runs. Deliberately not
-  // awaited — the point is that posts start now — and failures are swallowed
-  // because a background top-up that finds nothing must not sink the run.
-  if (process.env.USE_PROXY !== '0' && proxyPool.size() < POOL_TARGET) {
-    proxyPool
-      .warmPool(POOL_TARGET, (m) => console.log(`   [proxy·bg] ${m}`))
-      .then(() => console.log(`   [proxy·bg] Pool now ${proxyPool.size()}.`))
-      .catch(() => {});
-  }
-
   const results = [];
   const sessionsUsed = [];
   const noteSession = (e) => sessionsUsed.push({ ...e, at: new Date().toISOString() });
 
-  let topUpCooldown = 0;
-  let topUpInFlight = null;
-
-  /**
-   * Refills the pool once deaths have thinned it. Concurrent workers all hit
-   * this, so the sweep is shared rather than run once per worker; a top-up
-   * that finds nothing costs a full probe pass and backs off afterwards.
-   */
-  async function topUpPoolIfThin() {
-    if (process.env.USE_PROXY === '0') return;
-    if (proxyPool.size() >= MIN_POOL_SIZE) return;
-    if (topUpCooldown > 0) { topUpCooldown -= 1; return; }
-    if (topUpInFlight) return topUpInFlight;
-
-    const before = proxyPool.size();
-    console.log(`   [proxy] Pool down to ${before} — topping up.`);
-    topUpInFlight = proxyPool
-      .warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`))
-      .then(() => {
-        if (proxyPool.size() - before <= 0) {
-          topUpCooldown = TOP_UP_BACKOFF_POSTS;
-          console.log(`   [proxy] No replacements found — pausing top-ups for ${TOP_UP_BACKOFF_POSTS} posts.`);
-        }
-      })
-      .finally(() => { topUpInFlight = null; });
-    return topUpInFlight;
-  }
 
   // An explicit category scrapes just that one; otherwise every section is
   // walked. The cap applies per area *and* per category, so eight sections
@@ -772,7 +762,6 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
         cursor += 1;
         if (i >= urls.length) return;
 
-        await topUpPoolIfThin();
         const row = await scrapePostWithRotation(urls[i], area, ATTEMPTS_PER_POST, noteSession);
         // Carry the section through so a mixed run stays readable.
         rows[i] = { ...row, category, categoryName: cat.name };

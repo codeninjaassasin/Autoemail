@@ -53,12 +53,6 @@ async function disconnectAccount(id) {
   loadAccounts();
 }
 
-function parseRecipients(raw) {
-  return raw
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -72,14 +66,12 @@ form.addEventListener('submit', async (e) => {
     return;
   }
 
-  const recipients = parseRecipients(document.getElementById('recipients').value);
-  const invalid = recipients.filter((r) => !EMAIL_RE.test(r));
-  if (invalid.length > 0) {
-    recipientErrorsEl.textContent = `Invalid address${invalid.length > 1 ? 'es' : ''}: ${invalid.join(', ')}`;
-    return;
-  }
+  // The scraped table is the recipient list; there is no separate field to
+  // read, so nothing can drift out of sync with what's on screen.
+  const recipients = selectedRecipients().filter((r) => EMAIL_RE.test(r));
   if (recipients.length === 0) {
-    recipientErrorsEl.textContent = 'Enter at least one recipient.';
+    recipientErrorsEl.textContent =
+      'No recipients selected — scrape below, then tick rows that have an email.';
     return;
   }
 
@@ -164,7 +156,6 @@ researchSubmitBtn.addEventListener('click', async () => {
   console.log('YES');
   researchErrorsEl.textContent  = '';
   researchResultsEl.innerHTML   = '';
-  researchHarvestEl.textContent = '';
 
   if (selectedAreas.size === 0) {
     researchErrorsEl.textContent = 'Add at least one area.';
@@ -187,7 +178,6 @@ researchSubmitBtn.addEventListener('click', async () => {
     const data = await res.json();
     const results = data.results ?? [{ success: false, error: data.error ?? 'Unknown error' }];
     renderResearchResults(results, data.proxyCheck);
-    harvestEmails(results);
   } catch (err) {
     renderResearchResults([{ success: false, error: err.message }]);
   } finally {
@@ -195,70 +185,6 @@ researchSubmitBtn.addEventListener('click', async () => {
     researchSubmitBtn.textContent = 'Start Scraping';
   }
 });
-
-// ── Harvest scraped addresses into the recipient list ────────────
-const recipientsEl      = document.getElementById('recipients');
-const researchHarvestEl = document.getElementById('research-harvest');
-
-/**
- * Appends every address the scrape found to the recipient box.
- *
- * Adding rather than replacing: the field is the user's own working list and
- * a scrape shouldn't wipe what they typed. Dedupe is case-insensitive and
- * covers both the existing contents and the scrape itself — the same employer
- * address turns up across several posts, and each duplicate would otherwise
- * become another draft to the same person.
- */
-function harvestEmails(results) {
-  const existing = parseRecipients(recipientsEl.value);
-  const seen = new Set(existing.map((e) => e.toLowerCase()));
-
-  const added = [];
-  let duplicates = 0;
-
-  for (const item of results) {
-    for (const raw of item.contacts?.emails ?? []) {
-      const email = String(raw).trim();
-      // Extraction is heuristic, so anything malformed is dropped here rather
-      // than left to fail one-by-one at draft time.
-      if (!EMAIL_RE.test(email)) continue;
-      const key = email.toLowerCase();
-      if (seen.has(key)) { duplicates += 1; continue; }
-      seen.add(key);
-      added.push(email);
-    }
-  }
-
-  if (added.length > 0) {
-    const prefix = existing.length > 0 ? `${existing.join('\n')}\n` : '';
-    recipientsEl.value = prefix + added.join('\n');
-  }
-
-  renderHarvestSummary(added.length, duplicates, results);
-}
-
-function renderHarvestSummary(addedCount, duplicates, results) {
-  const blocked = results.filter((r) => r.captchaBlocked).length;
-  const parts = [];
-
-  if (addedCount > 0) {
-    parts.push(`Added ${addedCount} address${addedCount === 1 ? '' : 'es'} to the recipient list.`);
-  } else {
-    parts.push('No new addresses to add.');
-  }
-  if (duplicates > 0) parts.push(`${duplicates} already on the list.`);
-  // A CAPTCHA means addresses exist but couldn't be read — distinct from a
-  // listing that simply published no contact.
-  if (blocked > 0) parts.push(`${blocked} blocked by CAPTCHA.`);
-
-  researchHarvestEl.textContent = parts.join(' ');
-  researchHarvestEl.style.color = addedCount > 0 ? 'var(--success, #2e7d32)' : 'var(--muted)';
-
-  // The submit button is gated on having accounts connected, not recipients,
-  // so nothing to re-enable here — but the list changed, so clear any stale
-  // validation message sitting under it.
-  if (addedCount > 0) recipientErrorsEl.textContent = '';
-}
 
 // ── Result rendering ─────────────────────────────────────────────
 /** Renders an ISO timestamp as a short local date, plus how long ago it was. */
@@ -390,16 +316,34 @@ function renderResearchResults(results, proxyCheck) {
   const checkBox = renderProxyCheck(proxyCheck);
   if (checkBox) researchResultsEl.appendChild(checkBox);
 
-  if (results.length === 0) return;
+  // Only listings that can actually be contacted. A row with neither an email
+  // nor a phone has nothing to act on, and this table is the recipient list
+  // now — not a log of everything the scrape touched.
+  const contactable = results.filter(
+    (r) => r.success && ((r.contacts?.emails?.length ?? 0) > 0 || (r.contacts?.phones?.length ?? 0) > 0)
+  );
+
+  const skipped = results.length - contactable.length;
+  const note = document.createElement('div');
+  note.style.cssText = 'font-size:0.8rem;color:var(--muted);margin-bottom:0.5rem;';
+  note.textContent = contactable.length
+    ? `${contactable.length} contactable listing${contactable.length === 1 ? '' : 's'}` +
+      (skipped ? ` · ${skipped} without contact details, hidden` : '')
+    : `No contactable listings${skipped ? ` — ${skipped} had no contact details` : ''}.`;
+  researchResultsEl.appendChild(note);
+
+  researchResultsEl.appendChild(renderExitSummary(results));
+  if (contactable.length === 0) {
+    updateRecipientSummary();
+    return;
+  }
 
   const table = document.createElement('table');
-  // Six columns squeeze the title into a narrow ribbon at panel width; a floor
-  // keeps them readable and lets the wrapper scroll instead.
-  table.style.cssText = 'width:100%;min-width:820px;border-collapse:collapse;font-size:0.85rem;';
+  table.style.cssText = 'width:100%;min-width:560px;border-collapse:collapse;font-size:0.85rem;';
 
   const thead = document.createElement('thead');
   const hrow = document.createElement('tr');
-  for (const label of ['Title', 'Recipient (mail)', 'Recipient (phone)', 'Posted', 'Exit IP', 'Location']) {
+  for (const label of ['', 'Email', 'Phone', 'Posted']) {
     const th = document.createElement('th');
     th.textContent = label;
     th.style.cssText =
@@ -411,67 +355,71 @@ function renderResearchResults(results, proxyCheck) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  for (const item of results) {
-    const row = document.createElement('tr');
-
-    if (!item.success) {
-      // An area that failed outright has no per-post fields to line up under
-      // the columns, so give it the full width rather than three empty cells.
-      const td = cell(row, `✗ ${escapeHtml(item.area ?? item.url ?? '?')} — ${escapeHtml(item.error ?? 'Unknown error')}`);
-      td.colSpan = 6;
-      td.style.color = 'var(--error)';
-      tbody.appendChild(row);
-      continue;
-    }
-
+  for (const item of contactable) {
     const emails = item.contacts?.emails ?? [];
     const phones = item.contacts?.phones ?? [];
-    // "Blocked" and "nothing published" both yield zero contacts but mean
-    // opposite things — one is worth retrying, the other never will be.
-    const emptyReason = item.captchaBlocked ? 'blocked by CAPTCHA' : 'none in ad text';
+    const row = document.createElement('tr');
+
+    // Tick box drives the recipient list. Rows with no email are shown for
+    // their phone number but can't be written to, so the box is disabled.
+    const pick = document.createElement('td');
+    pick.style.cssText = 'padding:0.5rem 0.6rem;border-top:1px solid var(--border);vertical-align:top;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = emails.length > 0;
+    cb.disabled = emails.length === 0;
+    cb.dataset.emails = emails.join(',');
+    cb.title = item.name || '';
+    cb.addEventListener('change', updateRecipientSummary);
+    pick.appendChild(cb);
+    row.appendChild(pick);
 
     cell(row,
-      `<a href="${safeUrl(item.url)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">` +
-      `${escapeHtml(item.name ?? '(untitled)')}</a>` +
-      `<div style="color:var(--muted);font-size:0.75rem;margin-top:0.15rem;">` +
-      `${escapeHtml(item.area || '')}${item.categoryName ? ` · ${escapeHtml(item.categoryName)}` : ''}</div>`
-    );
-
-    cell(row,
-      emails.length ? emails.map((e) => escapeHtml(e)).join('<br>') : emptyReason,
+      emails.length
+        ? emails.map((e) =>
+            `<a href="${safeUrl(item.url)}" target="_blank" rel="noopener" title="${escapeHtml(item.name || '')}"` +
+            ` style="color:var(--accent);text-decoration:none;">${escapeHtml(e)}</a>`
+          ).join('<br>')
+        : '—',
       { muted: emails.length === 0 }
     );
 
-    cell(row,
-      phones.length ? phones.map((p) => escapeHtml(p)).join('<br>') : '—',
-      { muted: phones.length === 0 }
-    );
+    cell(row, phones.length ? phones.map(escapeHtml).join('<br>') : '—', { muted: phones.length === 0 });
 
     const posted = formatPosted(item.postedAt);
     cell(row, escapeHtml(posted.text), { muted: !item.postedAt, title: posted.title });
 
-    // Sessions rotate mid-run, so this is per-row rather than per-run. A
-    // direct row is called out: it means no rotation happened for that post.
-    const exit = item.exit;
-    cell(row,
-      exit?.ip ? escapeHtml(exit.ip) + (exit.direct ? ' <span style="color:var(--error)">(direct)</span>' : '') : '—',
-      { muted: !exit?.ip, title: exit?.server || (exit?.direct ? 'No proxy — direct connection' : '') }
-    );
-    cell(row, escapeHtml(exit?.location ?? '—'), { muted: !exit?.location });
-
     tbody.appendChild(row);
   }
-
   table.appendChild(tbody);
 
-  researchResultsEl.appendChild(renderExitSummary(results));
-
-  // Table can outgrow the panel on narrow windows; scroll it rather than the
-  // page.
   const wrap = document.createElement('div');
   wrap.style.cssText = 'overflow-x:auto;border:1px solid var(--border);border-radius:8px;';
   wrap.appendChild(table);
   researchResultsEl.appendChild(wrap);
+
+  updateRecipientSummary();
+}
+
+/** Every address ticked in the table — this is the recipient list. */
+function selectedRecipients() {
+  const out = [];
+  for (const cb of researchResultsEl.querySelectorAll('input[type="checkbox"]:checked')) {
+    for (const e of (cb.dataset.emails || '').split(',').filter(Boolean)) {
+      if (!out.some((x) => x.toLowerCase() === e.toLowerCase())) out.push(e);
+    }
+  }
+  return out;
+}
+
+function updateRecipientSummary() {
+  const el = document.getElementById('recipient-summary');
+  if (!el) return;
+  const n = selectedRecipients().length;
+  el.textContent = n
+    ? `${n} address${n === 1 ? '' : 'es'} selected from the table below.`
+    : 'Scrape below, then tick the rows you want. Selected addresses become the recipients.';
+  el.style.color = n ? 'var(--success, #1a8a4a)' : 'var(--muted)';
 }
 
 // ── Modal open/close ─────────────────────────────────────────────
