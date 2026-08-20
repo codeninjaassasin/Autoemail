@@ -46,15 +46,22 @@ const VALIDATE_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS ?? 20000);
 // back-to-back ones, then answered again after sitting idle.
 const PER_IP_COOLDOWN_MS = Number(process.env.PROXY_IP_COOLDOWN_MS ?? 30000);
 
-// A proxy Craigslist has challenged will almost certainly be challenged again
-// — the block is on the address. Leaving it in the pool means handing it to
-// post after post, which looks like rotation while changing nothing.
+// A proxy Craigslist has just challenged will be challenged again if handed
+// straight back, so it's taken out of rotation — but only for a while. These
+// recover: the same exit answered again after sitting idle. Dropping them for
+// good emptied the pool mid-run and sent the rest of the posts out on the
+// user's own address, which is worse than waiting.
 const BURN_LIMIT = Number(process.env.PROXY_BURN_LIMIT ?? 2);
+const PENALTY_MS = Number(process.env.PROXY_PENALTY_MS ?? 10 * 60 * 1000);
+
+// How long a draw will wait for a rested tunnel before giving up on rotating.
+const MAX_WAIT_MS = Number(process.env.PROXY_MAX_WAIT_MS ?? 5 * 60 * 1000);
 
 let verified = [];
 let ring = 0;
 const lastUsed = new Map();
 const strikes = new Map();
+const penaltyUntil = new Map();
 
 function configured() {
   return PROXIES.length > 0;
@@ -299,7 +306,12 @@ async function next() {
   let bestReady = Infinity;
   for (let i = 0; i < verified.length; i += 1) {
     const p = verified[(ring + i) % verified.length];
-    const ready = (lastUsed.get(p.server) ?? 0) + PER_IP_COOLDOWN_MS;
+    // Eligible once it has both rested since its last use and served out any
+    // penalty from being challenged.
+    const ready = Math.max(
+      (lastUsed.get(p.server) ?? 0) + PER_IP_COOLDOWN_MS,
+      penaltyUntil.get(p.server) ?? 0
+    );
     if (ready < bestReady) {
       best = p;
       bestReady = ready;
@@ -309,10 +321,12 @@ async function next() {
   ring += 1;
   if (!best) return null;
 
-  const startAt = Math.max(now, bestReady);
-  lastUsed.set(best.server, startAt);
+  const wait = Math.max(0, bestReady - now);
+  // Waiting out a penalty is the point, but not indefinitely: past this the
+  // caller decides what to do rather than the pool stalling the run.
+  if (wait > MAX_WAIT_MS) return null;
 
-  const wait = startAt - now;
+  lastUsed.set(best.server, Math.max(now, bestReady));
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   return { ...best, waitedMs: wait };
 }
@@ -322,6 +336,7 @@ function markDead(server) {
   const before = verified.length;
   verified = verified.filter((p) => p.server !== server);
   strikes.delete(server);
+  penaltyUntil.delete(server);
   return before !== verified.length;
 }
 
@@ -334,10 +349,32 @@ function markChallenged(server) {
   const n = (strikes.get(server) ?? 0) + 1;
   strikes.set(server, n);
   if (n >= BURN_LIMIT) {
-    markDead(server);
+    // Benched, not discarded — it stays in the pool and comes back once the
+    // penalty expires. Strikes reset with it, so a tunnel that misbehaves
+    // again later gets the same allowance rather than being condemned by
+    // history.
+    penaltyUntil.set(server, Date.now() + PENALTY_MS);
+    strikes.delete(server);
     return true;
   }
   return false;
+}
+
+/** Seconds until the soonest tunnel is eligible again — for reporting. */
+function nextAvailableInMs() {
+  if (verified.length === 0) return Infinity;
+  const now = Date.now();
+  return Math.max(
+    0,
+    Math.min(
+      ...verified.map((p) =>
+        Math.max(
+          (lastUsed.get(p.server) ?? 0) + PER_IP_COOLDOWN_MS,
+          penaltyUntil.get(p.server) ?? 0
+        )
+      )
+    ) - now
+  );
 }
 
 function size() {
@@ -363,4 +400,7 @@ async function directIdentity() {
   }
 }
 
-module.exports = { warmPool, next, markDead, markChallenged, size, directIdentity, validate, configured };
+module.exports = {
+  warmPool, next, markDead, markChallenged, size, directIdentity, validate, configured,
+  nextAvailableInMs,
+};

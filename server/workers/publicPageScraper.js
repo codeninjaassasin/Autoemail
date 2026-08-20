@@ -107,6 +107,8 @@ const MAX_SESSION_RESTARTS = 3;
 // next address and nothing more, so the run still reaches the full count.
 const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 3);
 const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
+// Off by default: a run set up to rotate should not quietly stop rotating.
+const ALLOW_DIRECT_FALLBACK = process.env.ALLOW_DIRECT_FALLBACK === '1';
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -463,6 +465,18 @@ async function pickExit() {
         console.log(`   [proxy] Waited ${(picked.waitedMs / 1000).toFixed(0)}s for ${picked.ip} to cool down.`);
       }
       exit = { ...picked, direct: false };
+    } else if (proxyPool.configured() && !ALLOW_DIRECT_FALLBACK) {
+      // Silently switching to the user's own address is the wrong trade: it
+      // stops rotating and puts their real IP in front of the site they were
+      // rotating away from. A run configured for tunnels waits, or gives up on
+      // that post, rather than quietly leaking.
+      const waitS = Math.round(proxyPool.nextAvailableInMs() / 1000);
+      console.log(
+        `   [proxy] All ${proxyPool.size()} tunnels are resting` +
+          (Number.isFinite(waitS) ? ` (next free in ~${waitS}s)` : '') +
+          ' — skipping rather than going direct. Set ALLOW_DIRECT_FALLBACK=1 to change that.'
+      );
+      return null;
     } else {
       // Worth saying loudly: the run continues on the IP that was already
       // being blocked.
@@ -556,6 +570,16 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
 
   for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
     const exit = await pickExit();
+    if (!exit) {
+      // Every tunnel is resting. Report it against the post rather than
+      // pretending it was scraped and found nothing.
+      last = {
+        url, area, success: false,
+        error: 'All tunnels were resting — no rotated exit available for this post.',
+        exit: { server: null, ip: 'none', location: 'No tunnel available', direct: false },
+      };
+      break;
+    }
     onSession?.(exit);
     // Reused, not rebuilt: the warm cookie jar is what keeps the reply panel
     // from being challenged.
@@ -681,6 +705,11 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
 
     for (let attempt = 1; attempt <= LISTING_ATTEMPTS; attempt += 1) {
       const exit = await pickExit();
+      if (!exit) {
+        listingError = 'All tunnels were resting — no rotated exit available.';
+        listing = null;
+        break;
+      }
       noteSession(exit);
       // Kept open rather than closed: fetching the listing is what warms this
       // exit's cookie jar, and the posts that follow inherit it. Discarding it
