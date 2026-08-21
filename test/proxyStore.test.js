@@ -63,12 +63,15 @@ test('an unknown proxy cannot be blocked into existence', () => {
   assert.strictEqual(store.size(), 0);
 });
 
-test('the store survives a restart', async () => {
+test('the store survives a restart', () => {
   const store = freshStore();
   store.recordSuccess(A);
   store.recordSuccess(B);
-  // Saves are coalesced, so give the write a moment to land.
-  await new Promise((r) => setTimeout(r, 2500));
+
+  // No waiting: a deferred write was being lost when the process exited
+  // first, so an entire run's proven proxies vanished. Saves are synchronous
+  // and this asserts the file is on disk by the time recordSuccess returns.
+  assert.ok(fs.existsSync(STORE_FILE), 'written before the call returns');
 
   delete require.cache[require.resolve(MODULE)];
   const reloaded = require(MODULE);

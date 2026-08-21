@@ -34,24 +34,25 @@ function load() {
   return entries;
 }
 
-let saveTimer = null;
+/**
+ * Written straight through, not deferred.
+ *
+ * Saves used to be coalesced behind a 2s unref'd timer, which meant a pending
+ * write was dropped whenever the process exited first — a run that proved ten
+ * proxies persisted none of them, and every later run started from nothing.
+ * The file holds a few dozen small entries and changes at most once per post,
+ * so batching bought nothing and cost the entire feature.
+ */
 function save() {
-  // Coalesced: a busy run touches this on every post, and the file is small
-  // enough that rewriting it each time would be pure waste.
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    try {
-      fs.mkdirSync(STORE_DIR, { recursive: true });
-      fs.writeFileSync(
-        STORE_FILE,
-        JSON.stringify({ updatedAt: new Date().toISOString(), proxies: [...entries.values()] }, null, 2)
-      );
-    } catch (err) {
-      console.error('[proxy store] could not save:', err.message);
-    }
-  }, 2000);
-  saveTimer.unref?.();
+  try {
+    fs.mkdirSync(STORE_DIR, { recursive: true });
+    fs.writeFileSync(
+      STORE_FILE,
+      JSON.stringify({ updatedAt: new Date().toISOString(), proxies: [...entries.values()] }, null, 2)
+    );
+  } catch (err) {
+    console.error('[proxy store] could not save:', err.message);
+  }
 }
 
 /** Proxies that have produced a contact and haven't been retired. */
