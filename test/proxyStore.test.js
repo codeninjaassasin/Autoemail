@@ -80,3 +80,38 @@ test('the store survives a restart', () => {
 
   fs.rmSync(STORE_FILE, { force: true });
 });
+
+test('reachable proxies are remembered so a restart need not re-sweep', () => {
+  const store = freshStore();
+  store.recordReachable({ server: 'http://3.3.3.3:80', ip: '3.3.3.3', location: 'C' });
+  assert.strictEqual(store.freshReachable().length, 1);
+
+  delete require.cache[require.resolve(MODULE)];
+  const reloaded = require(MODULE);
+  assert.strictEqual(reloaded.freshReachable().length, 1, 'survives a restart');
+
+  fs.rmSync(STORE_FILE, { force: true });
+});
+
+test('a proven proxy is not offered again as merely reachable', () => {
+  // Otherwise the same proxy is seeded twice and the pool double-counts it.
+  const store = freshStore();
+  store.recordReachable(A);
+  store.recordSuccess(A);
+  assert.strictEqual(store.freshReachable().length, 0, 'proven takes precedence');
+  assert.strictEqual(store.size(), 1);
+
+  fs.rmSync(STORE_FILE, { force: true });
+});
+
+test('a dead proxy is dropped from both tiers', () => {
+  const store = freshStore();
+  store.recordReachable(B);
+  store.recordSuccess(B);
+  store.remove(B.server);
+  store.forget(B.server);
+  assert.strictEqual(store.size(), 0);
+  assert.strictEqual(store.freshReachable().length, 0);
+
+  fs.rmSync(STORE_FILE, { force: true });
+});

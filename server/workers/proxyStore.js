@@ -19,7 +19,15 @@ const STORE_FILE = path.join(STORE_DIR, 'proxies.json');
 // proxies too, so one bad post shouldn't retire one that has been earning.
 const BLOCK_LIMIT = Number(process.env.PROXY_BLOCK_LIMIT ?? 10);
 
+// Reachable-but-unproven proxies are kept too, with an expiry. Finding them is
+// the expensive part of a run — hundreds of candidates probed to fill a pool —
+// and discarding that at every restart meant paying for the same sweep over
+// and over. They expire because free proxies die: a stale entry is worse than
+// no entry, since it costs a timeout before it's discovered.
+const REACHABLE_TTL_MS = Number(process.env.PROXY_REACHABLE_TTL_MS ?? 60 * 60 * 1000);
+
 let entries = new Map();
+let reachable = new Map();
 let loaded = false;
 
 function load() {
@@ -28,6 +36,10 @@ function load() {
   try {
     const raw = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
     for (const e of raw.proxies ?? []) entries.set(e.server, e);
+    const cutoff = Date.now() - REACHABLE_TTL_MS;
+    for (const e of raw.reachable ?? []) {
+      if ((e.checkedAt ?? 0) >= cutoff) reachable.set(e.server, e);
+    }
   } catch {
     // No store yet, or it's unreadable — start empty rather than fail the run.
   }
@@ -48,11 +60,53 @@ function save() {
     fs.mkdirSync(STORE_DIR, { recursive: true });
     fs.writeFileSync(
       STORE_FILE,
-      JSON.stringify({ updatedAt: new Date().toISOString(), proxies: [...entries.values()] }, null, 2)
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          proxies: [...entries.values()],
+          reachable: [...reachable.values()],
+        },
+        null,
+        2
+      )
     );
   } catch (err) {
     console.error('[proxy store] could not save:', err.message);
   }
+}
+
+/**
+ * Records a proxy that passed validation but hasn't produced a contact yet.
+ * Saves the cost of rediscovering it after a restart.
+ */
+function recordReachable(p) {
+  load();
+  if (!p?.server) return;
+  reachable.set(p.server, {
+    server: p.server,
+    ip: p.ip,
+    location: p.location,
+    org: p.org,
+    ipVerified: p.ipVerified,
+    checkedAt: Date.now(),
+  });
+  save();
+}
+
+/** Reachable proxies still inside their expiry, minus any already proven. */
+function freshReachable() {
+  load();
+  const cutoff = Date.now() - REACHABLE_TTL_MS;
+  return [...reachable.values()].filter(
+    (e) => (e.checkedAt ?? 0) >= cutoff && !entries.has(e.server)
+  );
+}
+
+function forget(server) {
+  load();
+  const had = reachable.delete(server);
+  if (had) save();
+  return had;
 }
 
 /** Proxies that have produced a contact and haven't been retired. */
@@ -109,9 +163,9 @@ function recordBlock(server) {
 
 function remove(server) {
   load();
-  const had = entries.delete(server);
+  const had = entries.delete(server) | reachable.delete(server);
   if (had) save();
-  return had;
+  return Boolean(had);
 }
 
 function stats() {
@@ -120,9 +174,14 @@ function stats() {
   return {
     total: all.length,
     proven: all.filter((e) => e.blocks < BLOCK_LIMIT).length,
+    reachable: freshReachable().length,
     totalSuccesses: all.reduce((n, e) => n + (e.successes ?? 0), 0),
     blockLimit: BLOCK_LIMIT,
   };
 }
 
-module.exports = { proven, size, has, recordSuccess, recordBlock, remove, stats, BLOCK_LIMIT, STORE_FILE };
+module.exports = {
+  proven, size, has, recordSuccess, recordBlock, remove, stats,
+  recordReachable, freshReachable, forget,
+  BLOCK_LIMIT, STORE_FILE,
+};

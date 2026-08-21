@@ -350,12 +350,23 @@ async function warmPool(target = 8, log = () => {}) {
     // proven by outcome, which is stronger than any liveness check, and
     // re-probing them each run would throw that away.
     let seeded = 0;
+    let recalled = 0;
     for (const e of store.proven()) {
       if (!verified.some((v) => v.server === e.server)) {
         verified.push({ server: e.server, ip: e.ip, location: e.location, org: e.org, ipVerified: true });
         seeded += 1;
       }
     }
+    // Reachable-but-unproven ones come back too. Finding these is what makes a
+    // cold start expensive — hundreds of candidates probed to fill a pool — and
+    // rediscovering the same ones every restart was pure repetition.
+    for (const e of store.freshReachable()) {
+      if (!verified.some((v) => v.server === e.server)) {
+        verified.push({ server: e.server, ip: e.ip, location: e.location, org: e.org, ipVerified: e.ipVerified });
+        recalled += 1;
+      }
+    }
+    if (recalled > 0) log(`${recalled} reachable recalled from the store.`);
     // Count what the store contributed, not the size of the live pool. The
     // pool persists across top-ups, so reporting its size here read as "the
     // store is working" when the store was in fact empty.
@@ -385,6 +396,10 @@ async function warmPool(target = 8, log = () => {}) {
 
         const live = (await Promise.all(batch.map((c) => validate(c)))).filter(Boolean);
         for (const p of live) {
+          // Worth remembering even before it produces anything: the probing
+          // is the expensive part, and this is what stops the next run
+          // repeating it.
+          store.recordReachable(p);
           // Dedupe on the exit where it's known — several entries often share
           // one — and on the address otherwise.
           const dupe = verified.some((v) =>
@@ -467,8 +482,9 @@ function markDead(server) {
   strikes.delete(server);
   penaltyUntil.delete(server);
   // A proxy that can't carry traffic isn't worth remembering, whatever it
-  // produced before.
+  // produced before — in either tier.
   store.remove(server);
+  store.forget(server);
   return before !== verified.length;
 }
 
