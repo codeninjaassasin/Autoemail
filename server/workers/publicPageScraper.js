@@ -110,6 +110,11 @@ const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 5);
 const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
 // Off by default: a run set up to rotate should not quietly stop rotating.
 const ALLOW_DIRECT_FALLBACK = process.env.ALLOW_DIRECT_FALLBACK === '1';
+// A fixed set of tunnels is checked once and that's the pool. A public list
+// is a different shape: entries die constantly, so the pool has to be topped
+// up during the run or it drains to nothing.
+const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 12);
+const POOL_MIN = Number(process.env.PROXY_POOL_MIN ?? 4);
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -718,7 +723,7 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     const t0 = Date.now();
     // The tunnels are a fixed, local set, so all of them are checked at once
     // and that's the whole pool — there is nothing more to discover later.
-    proxyCheck = await proxyPool.warmPool(undefined, (m) => console.log(`   [proxy] ${m}`));
+    proxyCheck = await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
     proxyCheck.elapsedMs = Date.now() - t0;
 
     if (proxyCheck.working === 0) {
@@ -741,6 +746,20 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
   const results = [];
   const sessionsUsed = [];
   const noteSession = (e) => sessionsUsed.push({ ...e, at: new Date().toISOString() });
+
+  // Shared so concurrent workers wait on one sweep rather than each starting
+  // their own.
+  let topUpInFlight = null;
+  async function topUpIfThin() {
+    if (!proxyPool.usingPublicLists?.()) return;
+    if (proxyPool.size() >= POOL_MIN) return;
+    if (topUpInFlight) return topUpInFlight;
+    console.log(`   [proxy] Pool down to ${proxyPool.size()} — searching for more.`);
+    topUpInFlight = proxyPool
+      .warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`))
+      .finally(() => { topUpInFlight = null; });
+    return topUpInFlight;
+  }
 
 
   // An explicit category scrapes just that one; otherwise every section is
@@ -877,6 +896,10 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
        const i = cursor;
        cursor += 1;
        if (i >= urls.length) return;
+
+       // Public-list entries die as the run goes; without this the pool
+       // drains and every remaining post is skipped for want of an exit.
+       await topUpIfThin();
 
        const { url, cat, category } = urls[i];
        const row = await scrapePostWithRotation(url, area, ATTEMPTS_PER_POST, noteSession);

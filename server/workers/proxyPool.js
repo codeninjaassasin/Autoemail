@@ -20,6 +20,72 @@ const PROXIES = (process.env.PROXY_STATIC || '')
   .map((s) => s.trim())
   .filter(Boolean);
 
+// Public proxy lists, used when no tunnels are configured.
+//
+// These were dropped once — most entries are dead and the survivors are
+// shared with everyone else using the same list. They're back because the
+// reason scraping failed then turned out to be a cold cookie jar, not the
+// addresses: the warm-session fix landed after they were removed, so they
+// have never actually been tried with a working scraper. Several sources
+// rather than one because the hit rate is low and they overlap heavily.
+const LIST_URLS = (process.env.PROXY_LIST_URLS || [
+  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text',
+  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=text',
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+  'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt',
+  'https://api.openproxylist.xyz/http.txt',
+].join(',')).split(',').map((u) => u.trim()).filter(Boolean);
+
+// How many candidates a single sweep will probe before giving up, and how
+// many at once. Most are dead and each corpse costs a full timeout, so the
+// batch is what makes this bearable at all.
+const MAX_CANDIDATES = Number(process.env.PROXY_MAX_TRIES ?? 400);
+const PROBE_BATCH = Number(process.env.PROXY_PROBE_BATCH ?? 50);
+const LIST_TTL_MS = 15 * 60 * 1000;
+
+let cachedList = [];
+let cachedAt = 0;
+let cursor = 0;
+
+function shuffle(items) {
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/** Every source merged, deduped and shuffled. One source failing is fine. */
+async function fetchList(force = false) {
+  if (PROXIES.length > 0) return PROXIES;
+  if (!force && Date.now() - cachedAt < LIST_TTL_MS && cachedList.length > 0) return cachedList;
+
+  const texts = await Promise.all(
+    LIST_URLS.map((u) =>
+      fetch(u, { signal: AbortSignal.timeout(25000) })
+        .then((r) => (r.ok ? r.text() : ''))
+        .catch(() => '')
+    )
+  );
+
+  const seen = new Set();
+  for (const line of texts.join('\n').split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    // Sources differ: some prefix a scheme, most are bare host:port.
+    const m = t.match(/^(?:(https?|socks[45]):\/\/)?((?:[0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{2,5})$/);
+    if (m) seen.add(`${m[1] || 'http'}://${m[2]}`);
+  }
+
+  cachedList = shuffle([...seen]);
+  cachedAt = Date.now();
+  cursor = 0;
+  return cachedList;
+}
+
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -64,7 +130,12 @@ const strikes = new Map();
 const penaltyUntil = new Map();
 
 function configured() {
-  return PROXIES.length > 0;
+  return PROXIES.length > 0 || LIST_URLS.length > 0;
+}
+
+/** True when running on public lists rather than tunnels you control. */
+function usingPublicLists() {
+  return PROXIES.length === 0 && LIST_URLS.length > 0;
 }
 
 /** Pulls a field out of a raw HTTP response without un-chunking it first. */
@@ -251,25 +322,59 @@ let warmInFlight = null;
  * All of them are probed concurrently — there are a handful, not a thousand,
  * and they're local.
  */
-async function warmPool(_target, log = () => {}) {
+async function warmPool(target = 8, log = () => {}) {
   if (warmInFlight) await warmInFlight.catch(() => {});
   warmInFlight = (async () => {
-    const report = { checked: 0, working: 0, proxies: [], listSize: PROXIES.length, error: null };
-    if (!configured()) {
-      report.error = 'No tunnels configured (set PROXY_STATIC).';
+    const report = { checked: 0, working: 0, target, proxies: [], listSize: 0, error: null };
+
+    let list;
+    try {
+      list = await fetchList();
+    } catch (err) {
+      report.error = err.message;
+      log(report.error);
+      return report;
+    }
+    report.listSize = list.length;
+    if (list.length === 0) {
+      report.error = 'No proxies configured or fetched.';
       log(report.error);
       return report;
     }
 
-    const results = await Promise.all(PROXIES.map((p) => validate(p)));
-    report.checked = PROXIES.length;
+    // A fixed set you control is worth one full pass; a public list of
+    // thousands is swept until enough live ones are found.
+    if (PROXIES.length > 0) {
+      const results = await Promise.all(PROXIES.map((p) => validate(p)));
+      report.checked = PROXIES.length;
+      verified = [];
+      for (const p of results.filter(Boolean)) {
+        if (!verified.some((v) => v.server === p.server)) verified.push(p);
+      }
+    } else {
+      // Keep whatever is already alive; top up around it.
+      while (verified.length < target && report.checked < MAX_CANDIDATES) {
+        if (cursor >= list.length) {
+          list = await fetchList(true).catch(() => list);
+          cursor = 0;
+          if (list.length === 0) break;
+        }
+        const batch = list.slice(cursor, cursor + PROBE_BATCH);
+        cursor += batch.length;
+        report.checked += batch.length;
+        if (batch.length === 0) break;
 
-    verified = [];
-    for (const p of results.filter(Boolean)) {
-      // Keyed on the tunnel address, not the exit: two tunnels whose exit
-      // can't be read both report "unknown", and deduping on that collapsed
-      // eight healthy tunnels into one.
-      if (!verified.some((v) => v.server === p.server)) verified.push(p);
+        const live = (await Promise.all(batch.map((c) => validate(c)))).filter(Boolean);
+        for (const p of live) {
+          // Dedupe on the exit where it's known — several entries often share
+          // one — and on the address otherwise.
+          const dupe = verified.some((v) =>
+            p.ip && p.ip !== 'unknown' ? v.ip === p.ip : v.server === p.server
+          );
+          if (!dupe) verified.push(p);
+        }
+        log(`checked ${report.checked}/${list.length} — ${verified.length}/${target} usable`);
+      }
     }
 
     report.working = verified.length;
@@ -280,7 +385,7 @@ async function warmPool(_target, log = () => {}) {
       org: p.org,
       ipVerified: p.ipVerified,
     }));
-    log(`${report.working}/${report.checked} tunnels usable.`);
+    log(`${report.working} proxies ready (from ${report.checked} checked).`);
     return report;
   })();
 
@@ -407,5 +512,5 @@ async function directIdentity() {
 
 module.exports = {
   warmPool, next, markDead, markChallenged, size, directIdentity, validate, configured,
-  nextAvailableInMs,
+  nextAvailableInMs, usingPublicLists, fetchList,
 };
