@@ -113,8 +113,13 @@ const ALLOW_DIRECT_FALLBACK = process.env.ALLOW_DIRECT_FALLBACK === '1';
 // A fixed set of tunnels is checked once and that's the pool. A public list
 // is a different shape: entries die constantly, so the pool has to be topped
 // up during the run or it drains to nothing.
-const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 12);
-const POOL_MIN = Number(process.env.PROXY_POOL_MIN ?? 4);
+// The pool is kept at this size, and topped up whenever it falls below.
+const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 50);
+const POOL_MIN = Number(process.env.PROXY_POOL_MIN ?? 50);
+// How many proxies the pre-research step proves before the run proper starts.
+const PRERESEARCH_TARGET = Number(process.env.PRERESEARCH_TARGET ?? 50);
+// Proving is done against real posts, several at a time.
+const PRERESEARCH_CONCURRENCY = Number(process.env.PRERESEARCH_CONCURRENCY ?? 6);
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -672,6 +677,12 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
       // will keep being challenged. Strike it, and once it's burned it leaves
       // the pool — otherwise it gets handed to post after post, which looks
       // like rotation while changing nothing.
+      // Counted against the proxy's permanent record as well as this run's:
+      // ten blocks across different posts retires it for good, since a proxy
+      // Craigslist keeps challenging is not going to start producing.
+      if (exit.server && proxyPool.recordBlock(exit.server)) {
+        console.log(`   [proxy] Retired ${exit.ip} — blocked too many times across runs.`);
+      }
       if (exit.server && proxyPool.markChallenged(exit.server)) {
         console.log(
           `   [proxy] Burned ${exit.ip} — challenged repeatedly, ` +
@@ -680,6 +691,12 @@ async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
         await retireSession(exit);
       }
       continue; // a different IP may not be challenged
+    }
+
+    // A proxy that produced a contact has proven itself in the only way that
+    // counts — reachability says nothing about whether the reply panel opens.
+    if (exit.server && (result.contacts?.emails?.length || result.contacts?.phones?.length)) {
+      proxyPool.recordSuccess(exit);
     }
 
     return result; // clean
@@ -711,6 +728,87 @@ async function runPost(ctx, url, area, exit) {
   } finally {
     await page.close().catch(() => {});
   }
+}
+
+/**
+ * Proves proxies by scraping real posts through them, until enough have
+ * produced a contact.
+ *
+ * Reachability only shows a proxy can load the site. What decides a run is
+ * whether the reply panel opens through it, and the only way to know that is
+ * to try. So the warm-up is a scrape: every proxy that earns its place does so
+ * by returning a contact, and those contacts are results — the step pays for
+ * itself rather than being setup cost.
+ *
+ * Proven proxies persist, so this is only expensive the first time.
+ */
+async function preResearch(area, category, target, opts = {}) {
+  const already = proxyPool.store.size();
+  if (already >= target) {
+    console.log(`── Pre-research skipped — ${already} proven proxies already stored ──`);
+    return [];
+  }
+
+  console.log(`── Pre-research: proving proxies until ${target} are stored (have ${already}) ──`);
+  const rows = [];
+
+  // Posts to prove against. Any section will do; the busiest is the safest
+  // bet for having enough of them.
+  let urls = [];
+  for (let attempt = 1; attempt <= LISTING_ATTEMPTS && urls.length === 0; attempt += 1) {
+    const exit = await pickExit();
+    if (!exit) break;
+    const session = await sessionFor(exit);
+    try {
+      const listing = await getPostUrls(area, category, session.context);
+      urls = listing.urls ?? [];
+    } catch { /* try another exit */ }
+  }
+  if (urls.length === 0) {
+    console.log('   [pre-research] Could not read a listing to prove against — skipping.');
+    return rows;
+  }
+
+  let idx = 0;
+  let attempts = 0;
+  const maxAttempts = Number(process.env.PRERESEARCH_MAX_ATTEMPTS ?? 2000);
+
+  async function prover() {
+    while (proxyPool.store.size() < target && attempts < maxAttempts) {
+      const i = idx % urls.length;
+      idx += 1;
+      attempts += 1;
+
+      const row = await scrapePostWithRotation(urls[i], area, 1, null);
+      const got =
+        (row?.contacts?.emails?.length ?? 0) + (row?.contacts?.phones?.length ?? 0) > 0;
+      if (got) {
+        rows.push({ ...row, category, categoryName: 'pre-research' });
+        opts.onRow?.(rows[rows.length - 1]);
+        console.log(
+          `   [pre-research] ${proxyPool.store.size()}/${target} proven ` +
+            `(${attempts} attempts) — ${row.exit?.ip ?? '?'}`
+        );
+      }
+      await topUpForPreResearch();
+    }
+  }
+
+  async function topUpForPreResearch() {
+    if (!proxyPool.usingPublicLists?.()) return;
+    if (proxyPool.size() >= POOL_MIN) return;
+    await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(PRERESEARCH_CONCURRENCY, urls.length) }, () => prover())
+  );
+
+  console.log(
+    `── Pre-research done: ${proxyPool.store.size()} proven proxies, ` +
+      `${rows.length} contacts collected on the way ──`
+  );
+  return rows;
 }
 
 async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
@@ -770,6 +868,14 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     category && category !== 'all'
       ? [{ code: category, name: category }]
       : ALL_CATEGORIES;
+
+  // Prove a working set before the run proper. Its contacts are real results,
+  // so this is not setup cost — and proven proxies persist, so it only runs
+  // in full the first time.
+  if (process.env.SKIP_PRERESEARCH !== '1' && proxyPool.usingPublicLists?.()) {
+    const pre = await preResearch(areas[0], 'sss', PRERESEARCH_TARGET, opts);
+    results.push(...pre);
+  }
 
   for (const area of areas) {
    // Listings for every section are gathered first, then their posts are

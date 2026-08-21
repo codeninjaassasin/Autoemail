@@ -1,6 +1,7 @@
 const http = require('http');
 const net = require('net');
 const tls = require('tls');
+const store = require('./proxyStore');
 
 /**
  * A pool of proxies you run yourself — the wireproxy tunnels generated from
@@ -41,7 +42,10 @@ const LIST_URLS = (process.env.PROXY_LIST_URLS || [
 // How many candidates a single sweep will probe before giving up, and how
 // many at once. Most are dead and each corpse costs a full timeout, so the
 // batch is what makes this bearable at all.
-const MAX_CANDIDATES = Number(process.env.PROXY_MAX_TRIES ?? 400);
+// 0 means walk the entire candidate list. Anything less leaves usable
+// proxies undiscovered while the run starves for exits.
+const RAW_MAX_TRIES = Number(process.env.PROXY_MAX_TRIES ?? 0);
+const MAX_CANDIDATES = RAW_MAX_TRIES > 0 ? RAW_MAX_TRIES : Infinity;
 const PROBE_BATCH = Number(process.env.PROXY_PROBE_BATCH ?? 50);
 const LIST_TTL_MS = 15 * 60 * 1000;
 
@@ -342,6 +346,16 @@ async function warmPool(target = 8, log = () => {}) {
       return report;
     }
 
+    // Proxies that have already produced a contact go straight in — they were
+    // proven by outcome, which is stronger than any liveness check, and
+    // re-probing them each run would throw that away.
+    for (const e of store.proven()) {
+      if (!verified.some((v) => v.server === e.server)) {
+        verified.push({ server: e.server, ip: e.ip, location: e.location, org: e.org, ipVerified: true });
+      }
+    }
+    if (verified.length > 0) log(`${verified.length} proven from previous runs.`);
+
     // A fixed set you control is worth one full pass; a public list of
     // thousands is swept until enough live ones are found.
     if (PROXIES.length > 0) {
@@ -447,7 +461,31 @@ function markDead(server) {
   verified = verified.filter((p) => p.server !== server);
   strikes.delete(server);
   penaltyUntil.delete(server);
+  // A proxy that can't carry traffic isn't worth remembering, whatever it
+  // produced before.
+  store.remove(server);
   return before !== verified.length;
+}
+
+/** A proxy produced a contact — remember it for future runs. */
+function recordSuccess(exit) {
+  if (!exit?.server) return;
+  store.recordSuccess(exit);
+}
+
+/**
+ * A proxy was challenged. Counted against its record, and retired once it has
+ * been blocked past the limit.
+ */
+function recordBlock(server) {
+  if (!server) return false;
+  const retired = store.recordBlock(server);
+  if (retired) {
+    verified = verified.filter((p) => p.server !== server);
+    penaltyUntil.delete(server);
+    strikes.delete(server);
+  }
+  return retired;
 }
 
 /**
@@ -512,5 +550,5 @@ async function directIdentity() {
 
 module.exports = {
   warmPool, next, markDead, markChallenged, size, directIdentity, validate, configured,
-  nextAvailableInMs, usingPublicLists, fetchList,
+  nextAvailableInMs, usingPublicLists, fetchList, recordSuccess, recordBlock, store,
 };
