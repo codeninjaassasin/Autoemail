@@ -64,12 +64,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const POST_CONCURRENCY = Number(process.env.POST_CONCURRENCY ?? 4);
 // The reply panel is CAPTCHA-gated for automated clients, so this bounds a
 // wait that usually ends in a challenge rather than a panel.
-const REPLY_PANEL_TIMEOUT_MS = Number(process.env.REPLY_PANEL_TIMEOUT_MS ?? 6000);
+// Six seconds was tuned against WireGuard tunnels. Through public proxies it
+// cut off pages that were still loading: a 28-post run produced 22 "panel
+// didn't open" and zero contacts, and the same settings at 20s produced five
+// contacts in 20 posts with the failures roughly halved. A wait that expires
+// early is indistinguishable from a page that never loads, and the cost of
+// waiting is far smaller than the cost of discarding a working proxy.
+const REPLY_PANEL_TIMEOUT_MS = Number(process.env.REPLY_PANEL_TIMEOUT_MS ?? 20000);
 // Page waits were tuned against fast tunnels. Public proxies are slower by an
 // order of magnitude, and a wait that expires early is indistinguishable from
 // a page that never loads — so these are adjustable rather than baked in.
-const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS ?? 15000);
-const BODY_TIMEOUT_MS = Number(process.env.BODY_TIMEOUT_MS ?? 10000);
+const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS ?? 40000);
+const BODY_TIMEOUT_MS = Number(process.env.BODY_TIMEOUT_MS ?? 25000);
 
 // Playwright's Chromium announces itself: navigator.webdriver is true, the
 // automation switch is on, and several APIs are missing or stubbed. Craigslist
