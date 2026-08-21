@@ -150,18 +150,35 @@ const SESSION_COOLDOWN_MS = Number(process.env.CAPTCHA_COOLDOWN_MS ?? 15000);
 const AREA_RE     = /^[a-z0-9-]+$/;
 const CATEGORY_RE = /^[a-z0-9]+$/;
 
-// Craigslist's top-level sections. Scraping every one of them is what "all
-// categories" means — the sub-categories underneath are reachable from these.
-const ALL_CATEGORIES = [
-  { code: 'ccc', name: 'community' },
-  { code: 'eee', name: 'events' },
-  { code: 'sss', name: 'for sale' },
-  { code: 'ggg', name: 'gigs' },
-  { code: 'hhh', name: 'housing' },
-  { code: 'jjj', name: 'jobs' },
-  { code: 'rrr', name: 'resumes' },
-  { code: 'bbb', name: 'services' },
-];
+// Craigslist's top-level sections, split by which side of the market they sit
+// on. This tool writes to people, so the ones worth scraping are where
+// individuals are offering themselves or their goods — not where businesses
+// are advertising work or property.
+const CATEGORY_NAMES = {
+  ccc: 'community',
+  eee: 'events',
+  sss: 'for sale',
+  ggg: 'gigs',
+  hhh: 'housing',
+  jjj: 'jobs',
+  rrr: 'resumes',
+  bbb: 'services',
+};
+
+// Default: people who want to be paid.
+//   resumes  — individuals looking for work, the primary target
+//   services — individuals selling their labour: handymen, cleaners, movers
+//   for sale — individuals selling possessions, often for quick cash
+// Deliberately excluded: jobs and gigs are employers offering work rather than
+// people seeking it; housing is landlords and agents; community and events are
+// neither. Override with CATEGORIES=rrr,bbb or similar.
+const DEFAULT_CATEGORY_CODES = ['rrr', 'bbb', 'sss'];
+
+const ALL_CATEGORIES = (process.env.CATEGORIES || DEFAULT_CATEGORY_CODES.join(','))
+  .split(',')
+  .map((c) => c.trim().toLowerCase())
+  .filter(Boolean)
+  .map((code) => ({ code, name: CATEGORY_NAMES[code] || code }));
 
 // Filtering at the source rather than after the fact: it cuts a Seattle jobs
 // search from 320 results to 44, so the cap per category spends its budget on
