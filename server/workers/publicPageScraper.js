@@ -61,7 +61,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Each post runs on its own proxy and browser, so overlapping them raises
 // throughput without raising the rate any single address presents.
-const POST_CONCURRENCY = Number(process.env.POST_CONCURRENCY ?? 4);
+// With a pool of fifty and a per-address cooldown governing the rate each one
+// sees, workers are the limit rather than exits — a run at three workers never
+// once waited for a rested exit, meaning most of the pool sat idle.
+const POST_CONCURRENCY = Number(process.env.POST_CONCURRENCY ?? 50);
 // The reply panel is CAPTCHA-gated for automated clients, so this bounds a
 // wait that usually ends in a challenge rather than a panel.
 // Six seconds was tuned against WireGuard tunnels. Through public proxies it
@@ -117,7 +120,16 @@ const MAX_SESSION_RESTARTS = 3;
 // Every post gets its own browser on its own proxy. Attempts here are per
 // post, not per run: a CAPTCHA or a dead proxy costs this post a retry on the
 // next address and nothing more, so the run still reaches the full count.
-const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 5);
+// Keep trying a post on new exits until it yields or there are no untried
+// exits left. A post that fails is almost never a bad post — it's a challenge
+// or a slow proxy — and giving up after a handful of tries discarded contacts
+// that the next exit would have returned. The loop is bounded by the pool:
+// pickExit refuses to repeat an exit for the same post, so it ends when the
+// pool is exhausted rather than at an arbitrary count.
+//
+// A post whose panel *opened* and showed nothing is a different case: that's a
+// genuine answer, and it returns immediately without burning the pool.
+const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 60);
 const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
 // Off by default: a run set up to rotate should not quietly stop rotating.
 const ALLOW_DIRECT_FALLBACK = process.env.ALLOW_DIRECT_FALLBACK === '1';
@@ -167,12 +179,11 @@ const CATEGORY_NAMES = {
 
 // Default: people who want to be paid.
 //   resumes  — individuals looking for work, the primary target
-//   services — individuals selling their labour: handymen, cleaners, movers
 //   for sale — individuals selling possessions, often for quick cash
-// Deliberately excluded: jobs and gigs are employers offering work rather than
-// people seeking it; housing is landlords and agents; community and events are
-// neither. Override with CATEGORIES=rrr,bbb or similar.
-const DEFAULT_CATEGORY_CODES = ['rrr', 'bbb', 'sss'];
+// Everything else is the wrong side of the market: jobs and gigs are employers
+// offering work, housing is landlords, community and events are neither.
+// Override with CATEGORIES=rrr,bbb,sss or similar.
+const DEFAULT_CATEGORY_CODES = ['rrr', 'sss'];
 
 const ALL_CATEGORIES = (process.env.CATEGORIES || DEFAULT_CATEGORY_CODES.join(','))
   .split(',')
