@@ -349,12 +349,17 @@ async function warmPool(target = 8, log = () => {}) {
     // Proxies that have already produced a contact go straight in — they were
     // proven by outcome, which is stronger than any liveness check, and
     // re-probing them each run would throw that away.
+    let seeded = 0;
     for (const e of store.proven()) {
       if (!verified.some((v) => v.server === e.server)) {
         verified.push({ server: e.server, ip: e.ip, location: e.location, org: e.org, ipVerified: true });
+        seeded += 1;
       }
     }
-    if (verified.length > 0) log(`${verified.length} proven from previous runs.`);
+    // Count what the store contributed, not the size of the live pool. The
+    // pool persists across top-ups, so reporting its size here read as "the
+    // store is working" when the store was in fact empty.
+    if (seeded > 0) log(`${seeded} seeded from the store (${verified.length} in the pool).`);
 
     // A fixed set you control is worth one full pass; a public list of
     // thousands is swept until enough live ones are found.

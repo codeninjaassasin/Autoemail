@@ -57,6 +57,10 @@ router.post('/scrape', (req, res) => {
 
   // Deliberately not awaited: the response goes back now with an id to poll.
   scrapeAreas(cleanAreas, cleanCategory, {
+    // Finding proxies takes minutes before a single post is read, and without
+    // this the page shows nothing the whole time — indistinguishable from a
+    // hang. The label is the only signal there is until rows start arriving.
+    onProgress: (label) => { job.currentLabel = label; },
     onPreflight: (report) => {
       job.proxyCheck = report;
       job.currentLabel = 'reading listings';

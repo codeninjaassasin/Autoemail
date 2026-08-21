@@ -65,6 +65,11 @@ const POST_CONCURRENCY = Number(process.env.POST_CONCURRENCY ?? 4);
 // The reply panel is CAPTCHA-gated for automated clients, so this bounds a
 // wait that usually ends in a challenge rather than a panel.
 const REPLY_PANEL_TIMEOUT_MS = Number(process.env.REPLY_PANEL_TIMEOUT_MS ?? 6000);
+// Page waits were tuned against fast tunnels. Public proxies are slower by an
+// order of magnitude, and a wait that expires early is indistinguishable from
+// a page that never loads — so these are adjustable rather than baked in.
+const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS ?? 15000);
+const BODY_TIMEOUT_MS = Number(process.env.BODY_TIMEOUT_MS ?? 10000);
 
 // Playwright's Chromium announces itself: navigator.webdriver is true, the
 // automation switch is on, and several APIs are missing or stubbed. Craigslist
@@ -350,12 +355,12 @@ async function getPostUrls(area, category, ctx) {
     // is a broken proxy, not an empty category, and conflating the two got a
     // dead proxy reported as "no listings" — which then looked like a real
     // answer and ended the retries.
-    await page.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
 
     // These live in the no-JS fallback list, which is present in the markup
     // but sits under a `display: none` parent — so wait for 'attached', not
     // the default 'visible', which would always time out.
-    await page.waitForSelector(LISTING_POST_LINK, { state: 'attached', timeout: 15000 });
+    await page.waitForSelector(LISTING_POST_LINK, { state: 'attached', timeout: NAV_TIMEOUT_MS });
     const urls = await page.$$eval(LISTING_POST_LINK, (links) =>
       links.map((a) => a.href).filter(Boolean)
     );
@@ -406,8 +411,8 @@ async function readPostedDate(page) {
 }
 
 async function processSinglePost(postUrl, page, area) {
-  await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-  await page.waitForSelector(BODY_SELECTOR, { timeout: 10000 });
+  await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  await page.waitForSelector(BODY_SELECTOR, { timeout: BODY_TIMEOUT_MS });
 
   // 1. Name
   let name = 'Unknown';
@@ -750,19 +755,34 @@ async function preResearch(area, category, target, opts = {}) {
   }
 
   console.log(`── Pre-research: proving proxies until ${target} are stored (have ${already}) ──`);
+  opts.onProgress?.(`proving proxies — 0/${target}`);
   const rows = [];
 
   // Posts to prove against. Any section will do; the busiest is the safest
   // bet for having enough of them.
+  // Free proxies are slow enough that a listing fetch often times out, and
+  // three attempts wasn't nearly enough — the step gave up before proving
+  // anything and the whole pass was skipped in silence. Each attempt uses an
+  // exit this fetch hasn't tried, and there are far more of them.
   let urls = [];
-  for (let attempt = 1; attempt <= LISTING_ATTEMPTS && urls.length === 0; attempt += 1) {
-    const exit = await pickExit();
+  const triedHere = new Set();
+  const listingTries = Number(process.env.PRERESEARCH_LISTING_ATTEMPTS ?? 15);
+  for (let attempt = 1; attempt <= listingTries && urls.length === 0; attempt += 1) {
+    const exit = await pickExit(triedHere);
     if (!exit) break;
+    if (exit.server) triedHere.add(exit.server);
     const session = await sessionFor(exit);
     try {
       const listing = await getPostUrls(area, category, session.context);
       urls = listing.urls ?? [];
-    } catch { /* try another exit */ }
+      if (urls.length === 0 && listing.challenged) {
+        console.log(`   [pre-research] listing attempt ${attempt} challenged — trying another exit.`);
+      }
+    } catch (err) {
+      if (attempt % 5 === 0) {
+        console.log(`   [pre-research] listing attempt ${attempt}/${listingTries} failed — still trying.`);
+      }
+    }
   }
   if (urls.length === 0) {
     console.log('   [pre-research] Could not read a listing to prove against — skipping.');
@@ -785,10 +805,10 @@ async function preResearch(area, category, target, opts = {}) {
       if (got) {
         rows.push({ ...row, category, categoryName: 'pre-research' });
         opts.onRow?.(rows[rows.length - 1]);
-        console.log(
-          `   [pre-research] ${proxyPool.store.size()}/${target} proven ` +
-            `(${attempts} attempts) — ${row.exit?.ip ?? '?'}`
-        );
+        const line =
+          `proving proxies — ${proxyPool.store.size()}/${target} (${attempts} attempts)`;
+        console.log(`   [pre-research] ${line} — ${row.exit?.ip ?? '?'}`);
+        opts.onProgress?.(line);
       }
       await topUpForPreResearch();
     }
@@ -821,7 +841,10 @@ async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
     const t0 = Date.now();
     // The tunnels are a fixed, local set, so all of them are checked at once
     // and that's the whole pool — there is nothing more to discover later.
-    proxyCheck = await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
+    proxyCheck = await proxyPool.warmPool(POOL_TARGET, (m) => {
+      console.log(`   [proxy] ${m}`);
+      opts.onProgress?.(`finding proxies — ${m}`);
+    });
     proxyCheck.elapsedMs = Date.now() - t0;
 
     if (proxyCheck.working === 0) {
