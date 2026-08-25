@@ -1,6 +1,7 @@
 const assert = require('node:assert');
 const test = require('node:test');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 /**
@@ -10,7 +11,14 @@ const path = require('node:path');
  * something that was working.
  */
 
-const STORE_FILE = path.join(__dirname, '..', 'data', 'proxies.json');
+// A scratch directory, never the app's own. These tests delete the store
+// between cases, and pointed at `data/` that deleted the real one — running
+// the suite threw away every proxy the app had proven.
+const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'autoemail-proxystore-'));
+process.env.PROXY_STORE_DIR = SCRATCH;
+test.after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
+
+const STORE_FILE = path.join(SCRATCH, 'proxies.json');
 const MODULE = path.join(__dirname, '..', 'server', 'workers', 'proxyStore.js');
 
 function freshStore() {

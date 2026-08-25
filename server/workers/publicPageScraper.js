@@ -1,5 +1,10 @@
 const { chromium } = require('playwright');
-const proxyPool = require('./proxyPool');
+const os = require('os');
+const { execSync } = require('child_process');
+const proxyLease = require('./proxyLease');
+const proxyFinder = require('./proxyFinder');
+const postStore = require('./postStore');
+const contactStore = require('./contactStore');
 
 // ── Selectors — update these if Craigslist changes its markup ─────
 // Verified against live craigslist markup. The old per-subdomain search
@@ -30,6 +35,25 @@ const CAPTCHA_MARKERS   = [
 // a challenge, or we'd relaunch the browser over an empty category.
 const CAPTCHA_TEXT_RE = /(?:are you a human|verify you(?:'re| are) (?:a )?human|unusual traffic|access denied|blocked)/i;
 
+// What Craigslist says when a listing is no longer there. Deliberately
+// specific: a false positive here deletes contacts we already collected.
+const POST_GONE_RE =
+  /(?:this posting has been (?:deleted|flagged for removal)|this posting has expired|posting has been deleted by its author|this post has been (?:deleted|removed))/i;
+
+/**
+ * True when the page is a tombstone rather than a listing.
+ *
+ * Checked before waiting for the posting body, because a removed post has no
+ * body and would otherwise be indistinguishable from a slow proxy.
+ */
+async function isPostGone(page) {
+  const text = await page.innerText('body').catch(() => '');
+  if (!text) return false;
+  // Only the top of the page: the phrase can appear inside an unrelated ad
+  // body further down, and a false positive costs us real contacts.
+  return POST_GONE_RE.test(text.slice(0, 1200));
+}
+
 /** True if the page currently shows a bot challenge rather than content. */
 async function looksChallenged(page) {
   for (const sel of CAPTCHA_MARKERS) {
@@ -59,12 +83,57 @@ function paceDelay() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Each post runs on its own proxy and browser, so overlapping them raises
-// throughput without raising the rate any single address presents.
-// With a pool of fifty and a per-address cooldown governing the rate each one
-// sees, workers are the limit rather than exits — a run at three workers never
-// once waited for a rested exit, meaning most of the pool sat idle.
-const POST_CONCURRENCY = Number(process.env.POST_CONCURRENCY ?? 50);
+// ── Trace ─────────────────────────────────────────────────────────
+// Everything interesting a run does — a proxy dying, a CAPTCHA, a retry —
+// only ever reached the terminal. Mirroring it to the caller is what lets the
+// UI show why a run is slow instead of just that it is.
+//
+// Module-level rather than threaded through every function: the proxy pool is
+// already a shared singleton, so two concurrent runs would interfere anyway.
+let emit = () => {};
+function trace(level, msg) {
+  emit({ level, msg, at: Date.now() });
+}
+
+// ── Stop ──────────────────────────────────────────────────────────
+// Cooperative rather than a kill: workers finish the page they are on, the
+// browsers get closed, and the rows already collected are returned. Tearing
+// the run down mid-post would leak a Chromium per worker and lose contacts
+// that were a moment from being saved.
+//
+// Module-level for the same reason `emit` is — the proxy pool is a singleton,
+// so only one run is meaningfully in flight at a time.
+let stopRequested = false;
+function requestStop() {
+  if (stopRequested) return false;
+  stopRequested = true;
+  proxyFinder.stop();
+  // A worker parked on waitForProxy has no timeout to fall out of.
+  proxyLease.abortWaiters();
+  trace('phase', 'stop requested — finishing in-flight posts');
+  return true;
+}
+function stopping() {
+  return stopRequested;
+}
+
+/**
+ * A sleep that gives up early when the run is stopping.
+ *
+ * The pacing gap is up to fifteen seconds and every worker sits in one; a
+ * plain sleep would make Stop look ignored for that long.
+ */
+async function sleepUnlessStopped(ms) {
+  const step = 250;
+  for (let waited = 0; waited < ms; waited += step) {
+    if (stopRequested) return;
+    await sleep(Math.min(step, ms - waited));
+  }
+}
+
+// How many posts run at once is no longer a number anyone picked — see
+// canSpawnWorker below, which grows the worker set until memory says stop.
+//
 // The reply panel is CAPTCHA-gated for automated clients, so this bounds a
 // wait that usually ends in a challenge rather than a panel.
 // Six seconds was tuned against WireGuard tunnels. Through public proxies it
@@ -111,38 +180,15 @@ const STEALTH_INIT = () => {
   }
 };
 
-// Craigslist pins its CAPTCHA to the browser session, so dropping the whole
-// session and relaunching usually clears it. Cap the restarts: if the
-// challenge follows us into a clean session the block is on the IP, and
-// relaunching forever just stalls the run.
-const MAX_SESSION_RESTARTS = 3;
-
-// Every post gets its own browser on its own proxy. Attempts here are per
-// post, not per run: a CAPTCHA or a dead proxy costs this post a retry on the
-// next address and nothing more, so the run still reaches the full count.
-// Keep trying a post on new exits until it yields or there are no untried
-// exits left. A post that fails is almost never a bad post — it's a challenge
-// or a slow proxy — and giving up after a handful of tries discarded contacts
-// that the next exit would have returned. The loop is bounded by the pool:
-// pickExit refuses to repeat an exit for the same post, so it ends when the
-// pool is exhausted rather than at an arbitrary count.
+// There is no per-post attempt ceiling any more. A post is released on one of
+// exactly two answers — a contact was extracted, or the reply panel opened and
+// the poster had published nothing. A challenge, a timeout or a dead exit is
+// none of those: it costs the *proxy*, never the post, and the worker comes
+// straight back round on a different address.
 //
-// A post whose panel *opened* and showed nothing is a different case: that's a
-// genuine answer, and it returns immediately without burning the pool.
-const ATTEMPTS_PER_POST = Number(process.env.PROXY_ATTEMPTS_PER_POST ?? 60);
-const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 3);
-// Off by default: a run set up to rotate should not quietly stop rotating.
-const ALLOW_DIRECT_FALLBACK = process.env.ALLOW_DIRECT_FALLBACK === '1';
-// A fixed set of tunnels is checked once and that's the pool. A public list
-// is a different shape: entries die constantly, so the pool has to be topped
-// up during the run or it drains to nothing.
-// The pool is kept at this size, and topped up whenever it falls below.
-const POOL_TARGET = Number(process.env.PROXY_POOL_TARGET ?? 50);
-const POOL_MIN = Number(process.env.PROXY_POOL_MIN ?? 50);
-// How many proxies the pre-research step proves before the run proper starts.
-const PRERESEARCH_TARGET = Number(process.env.PRERESEARCH_TARGET ?? 50);
-// Proving is done against real posts, several at a time.
-const PRERESEARCH_CONCURRENCY = Number(process.env.PRERESEARCH_CONCURRENCY ?? 6);
+// Attempts at a listing page still need a bound, since a section that cannot
+// be read is a section with nothing to queue rather than a post to insist on.
+const LISTING_ATTEMPTS = Number(process.env.PROXY_LISTING_ATTEMPTS ?? 5);
 
 // Chromium reports a broken proxy as a net:: error on navigation. Any of
 // these means the session is gone, not that this one post is unlucky —
@@ -190,6 +236,34 @@ const ALL_CATEGORIES = (process.env.CATEGORIES || DEFAULT_CATEGORY_CODES.join(',
   .map((c) => c.trim().toLowerCase())
   .filter(Boolean)
   .map((code) => ({ code, name: CATEGORY_NAMES[code] || code }));
+
+/**
+ * Turns whatever the caller asked for into the sections to walk.
+ *
+ * The UI now picks sections explicitly, so a list is the normal case. A bare
+ * string still works for the old single-category callers, and 'all' or nothing
+ * falls back to the set configured in CATEGORIES.
+ */
+function resolveCategories(requested) {
+  const codes = Array.isArray(requested)
+    ? requested
+    : requested && requested !== 'all'
+      ? [requested]
+      : null;
+  if (!codes || codes.length === 0) return ALL_CATEGORIES;
+
+  const seen = new Set();
+  const picked = [];
+  for (const raw of codes) {
+    const code = String(raw).trim().toLowerCase();
+    // Invalid codes are dropped rather than passed to buildSearchUrl, which
+    // would throw and take the whole run down over one bad checkbox.
+    if (!CATEGORY_RE.test(code) || seen.has(code)) continue;
+    seen.add(code);
+    picked.push({ code, name: CATEGORY_NAMES[code] || code });
+  }
+  return picked.length > 0 ? picked : ALL_CATEGORIES;
+}
 
 // Filtering at the source rather than after the fact: it cuts a Seattle jobs
 // search from 320 results to 44, so the cap per category spends its budget on
@@ -446,6 +520,16 @@ async function readPostedDate(page) {
 
 async function processSinglePost(postUrl, page, area) {
   await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+
+  // A listing that is gone has no posting body, so without this check it looks
+  // exactly like a slow page: the wait below times out, the exit gets blamed
+  // and relaxed, and the post is retried forever across the whole pool. Craig-
+  // slist says so plainly in the markup, so ask before waiting.
+  if (await isPostGone(page)) {
+    console.log(`   [${area}] Listing is gone (deleted, expired or flagged).`);
+    return { area, url: postUrl, name: null, gone: true, success: true };
+  }
+
   await page.waitForSelector(BODY_SELECTOR, { timeout: BODY_TIMEOUT_MS });
 
   // 1. Name
@@ -501,64 +585,6 @@ async function processSinglePost(postUrl, page, area) {
   };
 }
 
-/**
- * Opens a browser and reports the exit IP it will present.
- *
- * A rotated IP is the point of the proxy, so which one we ended up on is
- * recorded rather than assumed — a silent fall back to the direct connection
- * would look identical to a working rotation while changing nothing about the
- * block. Set USE_PROXY=0 to skip the pool entirely.
- */
-async function pickExit(exclude = null) {
-  let exit = { server: null, ip: 'unknown', location: 'Unknown', direct: true };
-  let cached = null;
-
-  if (process.env.USE_PROXY !== '0') {
-    // Round-robin, not consume: the pool is nearly always smaller than the
-    // number of posts, so entries have to come back around. This can block —
-    // the pool rests each address between uses.
-    const picked = await proxyPool.next({ exclude });
-    if (picked) {
-      if (picked.waitedMs > 0) {
-        console.log(`   [proxy] Waited ${(picked.waitedMs / 1000).toFixed(0)}s for ${picked.ip} to cool down.`);
-      }
-      exit = { ...picked, direct: false };
-    } else if (proxyPool.configured() && !ALLOW_DIRECT_FALLBACK) {
-      // Silently switching to the user's own address is the wrong trade: it
-      // stops rotating and puts their real IP in front of the site they were
-      // rotating away from. A run configured for tunnels waits, or gives up on
-      // that post, rather than quietly leaking.
-      const waitS = Math.round(proxyPool.nextAvailableInMs() / 1000);
-      console.log(
-        `   [proxy] All ${proxyPool.size()} tunnels are resting` +
-          (Number.isFinite(waitS) ? ` (next free in ~${waitS}s)` : '') +
-          ' — skipping rather than going direct. Set ALLOW_DIRECT_FALLBACK=1 to change that.'
-      );
-      return null;
-    } else {
-      // Worth saying loudly: the run continues on the IP that was already
-      // being blocked.
-      console.log('   [proxy] No proxy available — this request goes out DIRECT.');
-      cached = await directIdentityCached();
-      exit = { ...cached, direct: true };
-    }
-  } else {
-    cached = await directIdentityCached();
-    exit = { ...cached, direct: true };
-  }
-
-  return exit;
-}
-
-// Rotation is per post now, so the direct-identity lookup would otherwise
-// repeat on every one of them.
-let directCache = null;
-async function directIdentityCached() {
-  if (!directCache) directCache = await proxyPool.directIdentity();
-  return directCache;
-}
-
-/** Closes a session's browser, tolerating one that has already crashed. */
 async function closeSession(session) {
   if (session?.browser) await session.browser.close().catch(() => {});
 }
@@ -634,117 +660,6 @@ async function retireAllSessions() {
 }
 
 /**
- * Scrapes one post, rotating to a different proxy for each attempt.
- *
- * A fresh browser per attempt is the point: new IP, empty cookies. So a
- * CAPTCHA and a dead proxy are handled the same way — try the next address —
- * and neither costs anything beyond this one post. A proxy that fails to
- * navigate is dropped from the pool rather than handed out again.
- *
- * Returns the first clean result, or the last attempt if none came clean, so
- * every post yields a row either way.
- */
-async function scrapePostWithRotation(url, area, attemptsAllowed, onSession) {
-  let last = null;
-  // Each attempt for this post goes out on an address the post hasn't used.
-  const tried = new Set();
-
-  for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
-    const exit = await pickExit(tried);
-    if (exit?.server) tried.add(exit.server);
-    if (!exit) {
-      // Every tunnel is resting. Report it against the post rather than
-      // pretending it was scraped and found nothing.
-      last = {
-        url, area, success: false,
-        error: tried.size
-          ? `No untried exit available after ${tried.size} attempt(s).`
-          : 'All tunnels were resting — no rotated exit available for this post.',
-        exit: { server: null, ip: 'none', location: 'No tunnel available', direct: false },
-      };
-      break;
-    }
-    onSession?.(exit);
-    // Reused, not rebuilt: the warm cookie jar is what keeps the reply panel
-    // from being challenged.
-    const session = await sessionFor(exit);
-
-    const label = exit.direct ? 'direct' : `${exit.ip} (${exit.location})`;
-    if (attempt > 1) console.log(`   [${area}] Retry ${attempt}/${attemptsAllowed} via ${label}`);
-
-    const result = await runPost(session.context, url, area, exit);
-    last = result;
-
-    if (result.sessionFailed) {
-      // Proven bad right now — stop offering it to later posts.
-      await retireSession(exit);
-      if (exit.server && proxyPool.markDead(exit.server)) {
-        console.log(
-          `   [proxy] Dropped ${exit.ip} from the pool ` +
-            `(${proxyPool.size()} left): ${result.error.split('\n')[0].slice(0, 50)}`
-        );
-      }
-      continue;
-    }
-    // Anything that didn't produce a usable read gets another exit. Retrying
-    // was keyed on the error text looking like a network failure, so a post
-    // that timed out waiting for its body — not a phrase isSessionFailure
-    // matches — was written off after one attempt with its retries unspent.
-    // Whether a failure is worth another address doesn't depend on how the
-    // error was worded.
-    if (!result.success) {
-      if (attempt < attemptsAllowed) {
-        console.log(
-          `   [${area}] Failed on ${exit.ip} (${String(result.error).split('\n')[0].slice(0, 45)})` +
-            ' — retrying on another exit.'
-        );
-      }
-      continue;
-    }
-
-    // The panel failed to render and we couldn't confirm why. Worth another
-    // exit, but not worth striking this one: a strike on a guess would bench
-    // healthy tunnels.
-    if (result.panelUnavailable && !result.captchaBlocked) {
-      if (attempt < attemptsAllowed) {
-        console.log(`   [${area}] Reply panel unavailable — retrying on another exit.`);
-      }
-      continue;
-    }
-    if (result.captchaBlocked) {
-      // Craigslist blocks the address, not the request, so a challenged proxy
-      // will keep being challenged. Strike it, and once it's burned it leaves
-      // the pool — otherwise it gets handed to post after post, which looks
-      // like rotation while changing nothing.
-      // Counted against the proxy's permanent record as well as this run's:
-      // ten blocks across different posts retires it for good, since a proxy
-      // Craigslist keeps challenging is not going to start producing.
-      if (exit.server && proxyPool.recordBlock(exit.server)) {
-        console.log(`   [proxy] Retired ${exit.ip} — blocked too many times across runs.`);
-      }
-      if (exit.server && proxyPool.markChallenged(exit.server)) {
-        console.log(
-          `   [proxy] Burned ${exit.ip} — challenged repeatedly, ` +
-            `dropped from the pool (${proxyPool.size()} left).`
-        );
-        await retireSession(exit);
-      }
-      continue; // a different IP may not be challenged
-    }
-
-    // A proxy that produced a contact has proven itself in the only way that
-    // counts — reachability says nothing about whether the reply panel opens.
-    if (exit.server && (result.contacts?.emails?.length || result.contacts?.phones?.length)) {
-      proxyPool.recordSuccess(exit);
-    }
-
-    return result; // clean
-  }
-
-  return last;
-}
-
-/**
  * Runs one post on its own page, turning any failure into a result row.
  * `exit` is stamped on the row so each result records the IP it came through
  * — sessions rotate mid-run, so this varies from row to row.
@@ -768,341 +683,430 @@ async function runPost(ctx, url, area, exit) {
     await page.close().catch(() => {});
   }
 }
+// ── Orchestration ─────────────────────────────────────────────────
+//
+// Two subsystems that do not wait on each other:
+//
+//   proxyFinder  →  keeps the ready list topped up, forever, uncapped
+//   post workers →  take a lease from the ready list, work posts through it
+//                   until it is challenged, swap, repeat — forever
+//
+// A worker is bound to a *post*, not to a proxy. It does not release the post
+// until the contact is scraped or the post is proven to have none; a CAPTCHA
+// or a timeout costs it a proxy, never the post.
 
 /**
- * Proves proxies by scraping real posts through them, until enough have
- * produced a contact.
+ * How many workers to run.
  *
- * Reachability only shows a proxy can load the site. What decides a run is
- * whether the reply panel opens through it, and the only way to know that is
- * to try. So the warm-up is a scrape: every proxy that earns its place does so
- * by returning a contact, and those contacts are results — the step pays for
- * itself rather than being setup cost.
- *
- * Proven proxies persist, so this is only expensive the first time.
+ * Each holds a Chromium, so this is bounded by memory rather than by a number
+ * anyone picked. Free memory is sampled as workers spawn, and the pool stops
+ * growing when it drops below the floor — so it settles wherever the machine
+ * can actually sustain it and recovers as browsers are retired.
  */
-async function preResearch(area, category, target, opts = {}) {
-  const already = proxyPool.store.size();
-  if (already >= target) {
-    console.log(`── Pre-research skipped — ${already} proven proxies already stored ──`);
-    return [];
-  }
+const MEM_FLOOR_MB = Number(process.env.WORKER_MEM_FLOOR_MB ?? 2000);
+// Per-browser estimate used to hold back a reserve while workers are still
+// warming up; available memory does not drop until a browser has loaded.
+const MEM_PER_WORKER_MB = Number(process.env.WORKER_MEM_PER_MB ?? 220);
+// Share of total RAM the run may claim. The ceiling this implies is the
+// backstop; the live availability check below is what actually paces growth.
+const MEM_FRACTION = Number(process.env.WORKER_MEM_FRACTION ?? 0.5);
+const WORKER_MIN = Number(process.env.WORKER_MIN ?? 4);
 
-  console.log(`── Pre-research: proving proxies until ${target} are stored (have ${already}) ──`);
-  opts.onProgress?.(`proving proxies — 0/${target}`);
-  const rows = [];
+/**
+ * The ceiling that actually binds — proxy supply, not memory.
+ *
+ * Memory said 74 on this machine and 74 is what it ran. Measured over twelve
+ * minutes: every worker starved for three minutes straight (held=0, wait=74),
+ * 94% of leased exits completed zero posts, and the whole run produced 13
+ * emails. Free proxy lists verify at ~2% pool-wide and cannot feed that many
+ * browsers; the extra workers sat in waitForProxy holding a Chromium each.
+ *
+ * Fewer workers also probe less concurrently, and the probe pass rate is
+ * strongly concurrency-sensitive — so a smaller set should waste fewer good
+ * exits on false negatives as well.
+ */
+const WORKER_MAX = Number(process.env.WORKER_MAX ?? 15);
+const MEM_CEILING = Math.max(
+  WORKER_MIN,
+  Math.floor(((os.totalmem() / (1024 * 1024)) * MEM_FRACTION) / MEM_PER_WORKER_MB)
+);
+// Memory is still a bound, just no longer the binding one on a big machine.
+const WORKER_HARD_MAX = Number(process.env.WORKER_HARD_MAX ?? Math.min(WORKER_MAX, MEM_CEILING));
 
-  // Posts to prove against. Any section will do; the busiest is the safest
-  // bet for having enough of them.
-  // Free proxies are slow enough that a listing fetch often times out, and
-  // three attempts wasn't nearly enough — the step gave up before proving
-  // anything and the whole pass was skipped in silence. Each attempt uses an
-  // exit this fetch hasn't tried, and there are far more of them.
-  let urls = [];
-  const triedHere = new Set();
-  const listingTries = Number(process.env.PRERESEARCH_LISTING_ATTEMPTS ?? 15);
-  for (let attempt = 1; attempt <= listingTries && urls.length === 0; attempt += 1) {
-    const exit = await pickExit(triedHere);
-    if (!exit) break;
-    if (exit.server) triedHere.add(exit.server);
-    const session = await sessionFor(exit);
+/**
+ * Memory actually available, in MB.
+ *
+ * `os.freemem()` is unusable on macOS: it counts only wholly free pages, so a
+ * 32GB machine sitting at 71% free reports 219MB. Gating on it pinned the
+ * worker set to its minimum and the adaptive sizing never engaged at all.
+ * Darwin gets vm_stat instead, where free + inactive + speculative is the
+ * figure that matches what the OS will actually hand out.
+ */
+let memCache = { at: 0, mb: 0 };
+function availableMemMB() {
+  const now = Date.now();
+  if (now - memCache.at < 3000) return memCache.mb;
+
+  let mb;
+  if (process.platform === 'darwin') {
     try {
-      const listing = await getPostUrls(area, category, session.context);
-      urls = listing.urls ?? [];
-      if (urls.length === 0 && listing.challenged) {
-        console.log(`   [pre-research] listing attempt ${attempt} challenged — trying another exit.`);
-      }
-    } catch (err) {
-      if (attempt % 5 === 0) {
-        console.log(`   [pre-research] listing attempt ${attempt}/${listingTries} failed — still trying.`);
-      }
+      const out = execSync('vm_stat', { encoding: 'utf8', timeout: 2000 });
+      const pageSize = Number(out.match(/page size of (\d+)/)?.[1] ?? 4096);
+      const pages = (label) => Number(out.match(new RegExp(`${label}:\\s+(\\d+)`))?.[1] ?? 0);
+      const free = pages('Pages free') + pages('Pages inactive') + pages('Pages speculative')
+        + pages('Pages purgeable');
+      mb = Math.floor((free * pageSize) / (1024 * 1024));
+    } catch {
+      mb = Math.floor(os.freemem() / (1024 * 1024));
     }
-  }
-  if (urls.length === 0) {
-    console.log('   [pre-research] Could not read a listing to prove against — skipping.');
-    return rows;
+  } else {
+    mb = Math.floor(os.freemem() / (1024 * 1024));
   }
 
-  let idx = 0;
-  let attempts = 0;
-  const maxAttempts = Number(process.env.PRERESEARCH_MAX_ATTEMPTS ?? 2000);
+  memCache = { at: now, mb };
+  return mb;
+}
+// How often the listing loop goes back for newly posted listings.
+const LISTING_REFRESH_MS = Number(process.env.LISTING_REFRESH_MS ?? 5 * 60 * 1000);
 
-  async function prover() {
-    while (proxyPool.store.size() < target && attempts < maxAttempts) {
-      const i = idx % urls.length;
-      idx += 1;
-      attempts += 1;
+const freeMemMB = availableMemMB;
 
-      const row = await scrapePostWithRotation(urls[i], area, 1, null);
-      const got =
-        (row?.contacts?.emails?.length ?? 0) + (row?.contacts?.phones?.length ?? 0) > 0;
-      if (got) {
-        rows.push({ ...row, category, categoryName: 'pre-research' });
-        opts.onRow?.(rows[rows.length - 1]);
-        const line =
-          `proving proxies — ${proxyPool.store.size()}/${target} (${attempts} attempts)`;
-        console.log(`   [pre-research] ${line} — ${row.exit?.ip ?? '?'}`);
-        opts.onProgress?.(line);
-      }
-      await topUpForPreResearch();
-    }
-  }
-
-  async function topUpForPreResearch() {
-    if (!proxyPool.usingPublicLists?.()) return;
-    if (proxyPool.size() >= POOL_MIN) return;
-    await proxyPool.warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`));
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(PRERESEARCH_CONCURRENCY, urls.length) }, () => prover())
-  );
-
-  console.log(
-    `── Pre-research done: ${proxyPool.store.size()} proven proxies, ` +
-      `${rows.length} contacts collected on the way ──`
-  );
-  return rows;
+/** True while there is memory headroom for another browser. */
+function canSpawnWorker(current) {
+  if (current >= WORKER_HARD_MAX) return false;
+  if (current < WORKER_MIN) return true;
+  // Reserve for the browsers already spawned but not yet resident.
+  return availableMemMB() - MEM_PER_WORKER_MB > MEM_FLOOR_MB;
 }
 
-async function scrapeAreas(areas = [], category = 'jjj', opts = {}) {
-  // Check proxies before touching Craigslist. A session that goes hunting
-  // mid-run stalls the scrape, and a run that can't rotate at all is worth
-  // knowing about now rather than discovering post by post.
-  let proxyCheck = null;
-  if (process.env.USE_PROXY !== '0') {
-    console.log('── Checking proxies before scraping ──');
-    const t0 = Date.now();
-    // The tunnels are a fixed, local set, so all of them are checked at once
-    // and that's the whole pool — there is nothing more to discover later.
-    proxyCheck = await proxyPool.warmPool(POOL_TARGET, (m) => {
-      console.log(`   [proxy] ${m}`);
-      opts.onProgress?.(`finding proxies — ${m}`);
-    });
-    proxyCheck.elapsedMs = Date.now() - t0;
+/**
+ * Works one post to a conclusion, holding its proxy lease across attempts.
+ *
+ * Returns the lease to carry into the next post, or null when it was burned.
+ * The post is only finished on one of two real answers:
+ *
+ *   a contact was extracted, or
+ *   the reply panel opened and the poster had published nothing
+ *
+ * Everything else — challenge, timeout, dead exit — swaps the proxy and tries
+ * again. There is no attempt ceiling: that is what "until the contact is
+ * scraped" means.
+ */
+async function workPost(item, lease, workerId, opts) {
+  const { url, area, category, categoryName } = item;
+  // How much this lease has earned before it was challenged — the number that
+  // says whether holding a proxy across posts is paying off.
+  let leasePosts = lease?.posts ?? 0;
 
-    if (proxyCheck.working === 0) {
-      console.log(
-        `   [proxy] No usable proxy out of ${proxyCheck.checked} checked — ` +
-          'this run will go out on your own IP, unrotated.'
-      );
-    } else {
-      console.log(
-        `   [proxy] ${proxyCheck.working} usable proxy(s) ready ` +
-          `from ${proxyCheck.checked} checked in ${(proxyCheck.elapsedMs / 1000).toFixed(0)}s:`
-      );
-      for (const p of proxyCheck.proxies) console.log(`      · ${p.ip} — ${p.location}`);
+  while (!stopRequested) {
+    // Ask the finder for an exit and wait for one to be verified for us.
+    // There is no list to draw from — the proxy arrives seconds after it was
+    // proved against Craigslist, which is the whole point of the handoff.
+    if (!lease) {
+      lease = await proxyLease.waitForProxy(workerId);
+      if (!lease) break; // stopping
     }
-  }
-  // Hand the report back before the slow part begins, so a caller can show it
-  // without waiting for the scrape.
-  opts.onPreflight?.(proxyCheck);
+    if (stopRequested) break;
 
-  const results = [];
-  const sessionsUsed = [];
-  const noteSession = (e) => sessionsUsed.push({ ...e, at: new Date().toISOString() });
+    let session;
+    try {
+      session = await sessionFor(lease);
+    } catch (err) {
+      // The browser would not even launch through this exit.
+      proxyLease.block(lease.server, 'dead');
+      trace('drop', `blocked ${lease.ip} — browser launch failed`);
+      await retireSession(lease);
+      lease = null;
+      continue;
+    }
 
-  // Shared so concurrent workers wait on one sweep rather than each starting
-  // their own.
-  let topUpInFlight = null;
-  async function topUpIfThin() {
-    if (!proxyPool.usingPublicLists?.()) return;
-    if (proxyPool.size() >= POOL_MIN) return;
-    if (topUpInFlight) return topUpInFlight;
-    console.log(`   [proxy] Pool down to ${proxyPool.size()} — searching for more.`);
-    topUpInFlight = proxyPool
-      .warmPool(POOL_TARGET, (m) => console.log(`   [proxy] ${m}`))
-      .finally(() => { topUpInFlight = null; });
-    return topUpInFlight;
-  }
+    const result = await runPost(session.context, url, area, lease);
 
-
-  // An explicit category scrapes just that one; otherwise every section is
-  // walked. The cap applies per area *and* per category, so eight sections
-  // multiply the work — which is much of why the results are limited to
-  // today's postings.
-  const categories =
-    category && category !== 'all'
-      ? [{ code: category, name: category }]
-      : ALL_CATEGORIES;
-
-  // Prove a working set before the run proper. Its contacts are real results,
-  // so this is not setup cost — and proven proxies persist, so it only runs
-  // in full the first time.
-  if (process.env.SKIP_PRERESEARCH !== '1' && proxyPool.usingPublicLists?.()) {
-    const pre = await preResearch(areas[0], 'sss', PRERESEARCH_TARGET, opts);
-    results.push(...pre);
-  }
-
-  for (const area of areas) {
-   // Listings for every section are gathered first, then their posts are
-   // interleaved. Draining one section before starting the next meant the bulk
-   // classifieds — for-sale and housing run to hundreds of posts — consumed the
-   // whole exit pool, and the sections further down the list were never
-   // reached at all. Interleaving gives every section coverage from the start,
-   // so a run that ends early ends with something from each.
-   const queued = [];
-
-   for (const cat of categories) {
-    const category = cat.code;
-    const label = categories.length > 1 ? `${area}/${cat.name}` : area;
-
-    // Step 1: collect post URLs. The listing gets the same rotation treatment
-    // as a post — a challenge or a dead proxy here costs the whole area, so
-    // it's worth walking several addresses before giving up on it.
-    let listing = null;
-    let listingError = null;
-    // Same rule as posts: each attempt at this listing uses an address the
-    // listing hasn't already failed on.
-    const triedForListing = new Set();
-
-    for (let attempt = 1; attempt <= LISTING_ATTEMPTS; attempt += 1) {
-      const exit = await pickExit(triedForListing);
-      if (exit?.server) triedForListing.add(exit.server);
-      if (!exit) {
-        listingError = 'All tunnels were resting — no rotated exit available.';
-        listing = null;
-        break;
+    // ── The exit died ────────────────────────────────────────────
+    if (result.sessionFailed) {
+      await retireSession(lease);
+      if (proxyLease.block(lease.server, 'dead')) {
+        trace('drop', `blocked ${lease.ip} — cannot carry traffic`);
       }
-      noteSession(exit);
-      // Kept open rather than closed: fetching the listing is what warms this
-      // exit's cookie jar, and the posts that follow inherit it. Discarding it
-      // here is precisely the mistake that got every post challenged.
-      const session = await sessionFor(exit);
-      try {
-        listing = await getPostUrls(area, category, session.context);
-      } catch (err) {
-        listingError = err.message;
-        listing = null;
-        if (exit.server && isSessionFailure(err.message)) {
-          await retireSession(exit);
-          proxyPool.markDead(exit.server);
-          console.log(`   [proxy] Dropped ${exit.ip} (${proxyPool.size()} left) — listing failed.`);
+      lease = null;
+      continue;
+    }
+
+    // ── Craigslist challenged this address ───────────────────────
+    // Not a verdict on the proxy: it has been asking too fast, and the same
+    // exit answers again once it has been left alone. So it is benched for
+    // the relaxing period and rejoins the ready list afterwards for a fresh
+    // session, rather than being thrown away.
+    if (result.captchaBlocked) {
+      await retireSession(lease);
+      proxyLease.store.recordBlock(lease.server);
+      if (proxyLease.relax(lease.server, lease)) {
+        trace(
+          'captcha',
+          `CAPTCHA on ${lease.ip} after ${leasePosts} post(s) — relaxing ` +
+            `${Math.round(proxyLease.RELAX_MS / 60000)}min`
+        );
+      }
+      lease = null;
+      leasePosts = 0;
+      continue;
+    }
+
+    // ── Read never completed ─────────────────────────────────────
+    // A panel that did not render, or a navigation that failed. Says nothing
+    // about the post, so swap the exit and come back to it. Treated as a
+    // challenge we could not see rather than a dead proxy: the panel is
+    // CAPTCHA-gated, so this is overwhelmingly a challenge the detectors
+    // missed, and dropping the exit for it would discard working proxies.
+    if (!result.success || result.panelUnavailable) {
+      await retireSession(lease);
+      proxyLease.relax(lease.server, lease);
+      trace('retry', `${lease.ip} gave no read — relaxing it, post stays queued`);
+      lease = null;
+      leasePosts = 0;
+      continue;
+    }
+
+    // ── The listing is gone ──────────────────────────────────────
+    // Deleted, expired or flagged. Its contacts go with it: a Craigslist relay
+    // address stops routing the moment the post does, so leaving it in the
+    // recipient list means drafting to an address that bounces.
+    if (result.gone) {
+      proxyLease.noteUse(lease.server);
+      leasePosts += 1;
+      const dropped = contactStore.removeForPost(url);
+      postStore.markGone(url, { area, category });
+      const n = dropped.emails.length + dropped.phones.length;
+      trace(
+        'drop',
+        n > 0
+          ? `listing removed — dropped ${[...dropped.emails, ...dropped.phones].join(', ')}`
+          : 'listing removed — nothing had been collected from it'
+      );
+      opts.onRow?.({ ...result, category, categoryName, removedContacts: dropped });
+      return lease;
+    }
+
+    // ── A real answer ────────────────────────────────────────────
+    const emails = result.contacts?.emails ?? [];
+    const phones = result.contacts?.phones ?? [];
+    const row = { ...result, category, categoryName };
+
+    if (emails.length + phones.length > 0) {
+      // The proxy proved itself in the only way that counts. It keeps its
+      // lease and goes straight on to the next post.
+      proxyLease.recordSuccess(lease);
+      proxyLease.noteUse(lease.server);
+      leasePosts += 1;
+
+      // A re-read that found something different is worth calling out: it is
+      // an edited or reposted listing, which is the reason re-reads exist.
+      const seenBefore = postStore.previous(url);
+      const changed = postStore.hasChanged(url, { postedAt: result.postedAt, emails, phones });
+      postStore.markScraped(url, {
+        area, category, name: result.name, postedAt: result.postedAt, emails, phones,
+      });
+      row.rescraped = Boolean(seenBefore);
+      row.changed = changed;
+
+      if (seenBefore && changed) {
+        trace('contact', `updated ${[...emails, ...phones][0]} — listing changed since last read`);
+      } else if (!seenBefore) {
+        trace('contact', `${[...emails, ...phones][0]} via ${lease.ip}`);
+      }
+      opts.onRow?.(row);
+      return lease;
+    }
+
+    // The panel opened and there was nothing behind it. A genuine answer:
+    // record it so no worker ever picks this post up again.
+    proxyLease.noteUse(lease.server);
+    leasePosts += 1;
+    postStore.markDead(url, { area, category, name: result.name, postedAt: result.postedAt });
+    trace('empty', `no contact published — post closed`);
+    opts.onRow?.(row);
+    return lease;
+  }
+
+  return lease;
+}
+
+/**
+ * One worker: pulls posts off the queue and works each to a conclusion,
+ * carrying its proxy lease from post to post.
+ */
+async function postWorker(workerId, queue, opts, counters) {
+  let lease = null;
+  try {
+    while (!stopRequested) {
+      const item = queue.shift();
+      if (!item) return;
+      // Re-checked here as well as at queue time: a post can be settled by
+      // another worker between being queued and being picked up.
+      if (!postStore.shouldScrape(item.url)) continue;
+
+      lease = await workPost(item, lease, workerId, opts);
+      if (stopRequested) break;
+
+      counters.finished += 1;
+      opts.onStats?.({ finishedPosts: counters.finished });
+      // Pacing is per worker, so the aggregate rate scales with how many are
+      // running rather than each one sprinting through its queue.
+      if (PACE_MAX_MS > 0) await sleepUnlessStopped(paceDelay());
+    }
+  } finally {
+    if (lease) proxyLease.release(lease.server);
+  }
+}
+
+/**
+ * Collects the posts worth doing for one area and section.
+ *
+ * Listing fetches get a lease of their own and give it straight back — they
+ * are cheap, and holding an exit for one page would starve the post workers.
+ */
+async function collectPosts(area, cat, opts) {
+  const out = [];
+  let attempts = 0;
+
+  while (attempts < LISTING_ATTEMPTS && !stopRequested) {
+    attempts += 1;
+    // Listing fetches queue for a verified exit like any worker does.
+    const lease = await proxyLease.waitForProxy(`listing:${area}/${cat.code}`);
+    if (!lease) break; // stopping
+
+    try {
+      const session = await sessionFor(lease);
+      const listing = await getPostUrls(area, cat.code, session.context);
+      if (listing.challenged) {
+        await retireSession(lease);
+        proxyLease.relax(lease.server, lease);
+        trace('captcha', `CAPTCHA on the ${area}/${cat.name} listing — relaxing that exit`);
+        continue;
+      }
+      for (const url of listing.urls) {
+        if (postStore.shouldScrape(url)) {
+          out.push({ url, area, category: cat.code, categoryName: cat.name });
         }
       }
-      // Only a listing with actual URLs ends the retries. An empty result is
-      // usually a proxy that reached a different or partial page rather than a
-      // genuinely empty category, and treating it as an answer meant one bad
-      // proxy wrote off the whole area on the first try.
-      if (listing && !listing.challenged && listing.urls.length > 0) break;
-      if (attempt < LISTING_ATTEMPTS) {
-        const why = !listing ? 'navigation failed' : listing.challenged ? 'CAPTCHA' : 'no results';
-        console.log(`   [${area}] Listing attempt ${attempt}/${LISTING_ATTEMPTS} (${why}) — trying another proxy.`);
-      }
+      proxyLease.release(lease.server);
+      return out;
+    } catch (err) {
+      await retireSession(lease);
+      // Same split as posts: a proxy that cannot carry traffic goes, one that
+      // merely gave a bad read is rested and comes back.
+      if (isSessionFailure(err.message)) proxyLease.block(lease.server, 'dead');
+      else proxyLease.relax(lease.server, lease);
+      trace('retry', `${area}/${cat.name} listing failed on ${lease.ip} — another exit`);
     }
-
-    if (!listing) {
-      results.push({ area, category, success: false, error: `Could not load listing page: ${listingError}` });
-      continue;
-    }
-    if (listing.challenged) {
-      // Distinct from "no listings": the area may well have posts, we just
-      // can't see them. Saying so keeps it from reading as an empty area.
-      results.push({
-        area,
-        category,
-        success: false,
-        captchaBlocked: true,
-        error: `Craigslist served a CAPTCHA on the ${cat.name} search page across ${LISTING_ATTEMPTS} proxies.`,
-      });
-      continue;
-    }
-    if (listing.urls.length === 0) {
-      // Without this the area contributes no rows at all and the UI shows
-      // an empty result set that looks like success.
-      // Common and unremarkable now that results are limited to today: a
-      // quiet section simply has nothing new, which is not a failure.
-      if (categories.length === 1) {
-        results.push({ area, category, success: false, error: 'No listings found for this area/category.' });
-      } else {
-        console.log(`[${label}] nothing posted today.`);
-      }
-      continue;
-    }
-
-    // Queued rather than scraped here — see the note above the loop.
-    for (const url of listing.urls) queued.push({ url, cat, category });
-    console.log(`[${label}] ${listing.urls.length} posts queued.`);
-   }
-
-   if (queued.length === 0) continue;
-
-   // Interleave: one post from each section in turn, so coverage is spread
-   // rather than spent depth-first on whichever section happens to be biggest.
-   const byCat = new Map();
-   for (const item of queued) {
-     if (!byCat.has(item.category)) byCat.set(item.category, []);
-     byCat.get(item.category).push(item);
-   }
-   const lists = [...byCat.values()];
-   const urls = [];
-   for (let i = 0; urls.length < queued.length; i += 1) {
-     for (const list of lists) if (i < list.length) urls.push(list[i]);
-   }
-
-   console.log(
-     `[${area}] ${urls.length} posts across ${lists.length} section(s), interleaved ` +
-       `(${proxyPool.size()} exits in the pool).`
-   );
-   opts.onCategory?.({ area, category: 'all', categoryName: 'all sections', planned: urls.length });
-
-   const rows = new Array(urls.length);
-   let cursor = 0;
-   let done = 0;
-
-   async function worker(slot) {
-     // Stagger the openings so the workers don't all hit Craigslist on the
-     // same instant, which would undo the pacing.
-     await sleep(slot * (paceDelay() / POST_CONCURRENCY));
-
-     while (true) {
-       const i = cursor;
-       cursor += 1;
-       if (i >= urls.length) return;
-
-       // Public-list entries die as the run goes; without this the pool
-       // drains and every remaining post is skipped for want of an exit.
-       await topUpIfThin();
-
-       const { url, cat, category } = urls[i];
-       const row = await scrapePostWithRotation(url, area, ATTEMPTS_PER_POST, noteSession);
-       rows[i] = { ...row, category, categoryName: cat.name };
-       // Hand it over immediately: a long run is worth watching as it goes,
-       // not only once every category has finished.
-       opts.onRow?.(rows[i]);
-       done += 1;
-       if (done % 10 === 0 || done === urls.length) {
-         console.log(`   [${area}] ${done}/${urls.length} done.`);
-       }
-
-       // Pace per worker, so the aggregate rate scales with concurrency
-       // rather than each worker sprinting.
-       if (cursor < urls.length && PACE_MAX_MS > 0) await sleep(paceDelay());
-     }
-   }
-
-   const workers = Math.min(POST_CONCURRENCY, urls.length);
-   console.log(`[${area}] Running ${workers} post(s) at a time.`);
-   await Promise.all(Array.from({ length: workers }, (_, s) => worker(s)));
-   results.push(...rows.filter(Boolean));
   }
-
-  // Browsers are held open for the whole run now, so closing them is the
-  // run's job rather than each post's.
-  await retireAllSessions();
-
-  // Every row already carries its own `exit`, so the return shape is
-  // unchanged; this is just the run-level readout.
-  const distinct = new Map();
-  for (const s of sessionsUsed) distinct.set(s.ip, s);
-  console.log(
-    `\n── Exit IPs: ${distinct.size} distinct across ${sessionsUsed.length} browser session(s) ──`
-  );
-  for (const s of distinct.values()) {
-    console.log(`   ${s.ip} — ${s.location}${s.direct ? '  [DIRECT, no proxy]' : `  via ${s.server}`}`);
-  }
-
-  return results;
+  return out;
 }
 
-module.exports = { scrapeAreas, processSinglePost, getPostUrls, looksChallenged, extractContacts, ALL_CATEGORIES };
+/**
+ * The run. Never completes on its own — it cycles until stop is requested.
+ *
+ * Each cycle re-reads the listings, queues whatever the post store has not
+ * already settled, and works the queue down. When the queue empties it waits
+ * out the refresh interval and goes round again, picking up newly posted
+ * listings.
+ */
+async function runForever(areas = [], category = 'all', opts = {}) {
+  stopRequested = false;
+  emit = opts.onEvent ?? (() => {});
+  proxyLease.reset();
+
+  const categories = resolveCategories(category);
+  const counters = { finished: 0, queued: 0, cycles: 0 };
+  const stats = (patch) => opts.onStats?.(patch);
+
+  stats({ phase: 'finding proxies', area: null, totalPosts: 0, finishedPosts: 0, cycles: 0 });
+  trace('phase', `run started — ${areas.join(', ')} × ${categories.map((c) => c.name).join(', ')}`);
+
+  // The finder is driven by demand: it verifies only while somebody is
+  // waiting, and hands each pass straight to the worker that asked.
+  proxyFinder.start({
+    broker: proxyLease,
+    log: (m) => trace('pool', m),
+  });
+
+  const queue = [];
+
+  while (!stopRequested) {
+    counters.cycles += 1;
+    stats({ phase: 'reading listings', cycles: counters.cycles });
+
+    // ── Refill ───────────────────────────────────────────────────
+    for (const area of areas) {
+      if (stopRequested) break;
+      for (const cat of categories) {
+        if (stopRequested) break;
+        stats({ area, phase: 'reading listings' });
+        const found = await collectPosts(area, cat, opts);
+        queue.push(...found);
+        counters.queued += found.length;
+        if (found.length > 0) {
+          trace('phase', `${area}/${cat.name}: ${found.length} new post(s) queued`);
+        }
+        stats({ totalPosts: counters.queued, queueDepth: queue.length });
+      }
+    }
+
+    if (queue.length === 0) {
+      // Everything already settled. Wait for new listings rather than
+      // spinning through the same finished posts.
+      stats({ phase: 'waiting for new listings', area: null, queueDepth: 0 });
+      trace('phase', `nothing new — next listing sweep in ${Math.round(LISTING_REFRESH_MS / 1000)}s`);
+      await sleepUnlessStopped(LISTING_REFRESH_MS);
+      continue;
+    }
+
+    // ── Drain ────────────────────────────────────────────────────
+    stats({ phase: 'scraping' });
+    const running = new Set();
+    let nextId = 0;
+
+    while ((queue.length > 0 || running.size > 0) && !stopRequested) {
+      // Grow the worker set while memory allows and there is work waiting.
+      while (queue.length > 0 && canSpawnWorker(running.size) && !stopRequested) {
+        const id = `w${nextId += 1}`;
+        const p = postWorker(id, queue, opts, counters).finally(() => running.delete(p));
+        running.add(p);
+        stats({ workers: running.size, freeMemMB: freeMemMB() });
+      }
+
+      if (running.size === 0) {
+        // No headroom at all. Wait for a browser to be retired.
+        await sleepUnlessStopped(2000);
+        continue;
+      }
+      // Wake as soon as any worker finishes, so the set is topped straight up.
+      await Promise.race([...running, sleepUnlessStopped(2000)]);
+      stats({
+        workers: running.size,
+        queueDepth: queue.length,
+        waiting: proxyLease.waiterCount(),
+        freeMemMB: freeMemMB(),
+      });
+    }
+
+    await Promise.allSettled([...running]);
+  }
+
+  proxyFinder.stop();
+  // Wake anything still queued for a proxy, or those awaits never settle.
+  proxyLease.abortWaiters();
+  await retireAllSessions();
+  stats({ phase: 'stopped', area: null, workers: 0, finishedPosts: counters.finished });
+  trace('phase', `run stopped — ${counters.finished} posts finished over ${counters.cycles} cycle(s)`);
+  emit = () => {};
+  return [];
+}
+
+module.exports = {
+  runForever,
+  // Kept for the tests and for anything driving a single post directly.
+  processSinglePost, getPostUrls, looksChallenged, extractContacts,
+  ALL_CATEGORIES, CATEGORY_NAMES, DEFAULT_CATEGORY_CODES, resolveCategories,
+  requestStop, stopping,
+};

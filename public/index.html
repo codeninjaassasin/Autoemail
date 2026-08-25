@@ -35,13 +35,180 @@
     margin: 0;
     padding: 2rem 1rem;
   }
-  main {
-    max-width: 720px;
+  /* Two columns: the work on the left, a live readout of the run on the
+     right. The sidebar sticks so it stays visible while the results table
+     grows past the fold — a status panel you have to scroll back up to find
+     is no better than a log line. */
+  .layout {
+    max-width: 1160px;
     margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 330px;
+    gap: 1.5rem;
+    align-items: start;
+  }
+  main {
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
   }
+  aside#live-panel {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+  }
+  @media (max-width: 980px) {
+    .layout { grid-template-columns: minmax(0, 1fr); }
+    aside#live-panel { position: static; max-height: none; }
+  }
+
+  /* Live panel internals */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 0.9rem;
+  }
+  .stat {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.45rem 0.55rem;
+    background: var(--bg);
+  }
+  .stat .k {
+    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); display: block; margin-bottom: 0.15rem;
+  }
+  .stat .v { font-size: 1.05rem; font-weight: 600; }
+  .stat.wide { grid-column: 1 / -1; }
+  .stat.clickable { cursor: pointer; }
+  .stat.clickable:hover, .stat.clickable:focus-visible {
+    border-color: var(--accent); outline: none;
+  }
+  .stat.clickable:hover .v, .stat.clickable:focus-visible .v { color: var(--accent); }
+  .stat.clickable .k::after { content: ' ▸'; opacity: 0.6; }
+  .stat.wide .v { font-size: 0.9rem; word-break: break-word; }
+  .ip-group { margin-bottom: 0.85rem; }
+  .ip-group > h4 {
+    margin: 0 0 0.35rem; font-size: 0.7rem; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
+    display: flex; justify-content: space-between; gap: 0.5rem;
+  }
+  .ip-list {
+    display: flex; flex-wrap: wrap; gap: 0.25rem;
+    max-height: 8.5rem; overflow-y: auto;
+  }
+  .ip {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem; padding: 0.12rem 0.35rem; border-radius: 5px;
+    border: 1px solid var(--border); background: var(--bg); white-space: nowrap;
+  }
+  .ip.working { border-color: var(--success); color: var(--success); }
+  .ip.resting { color: var(--muted); }
+  .ip.penalised { border-color: var(--error); color: var(--error); }
+  .ip.safe { border-color: var(--accent); color: var(--accent); }
+  .ip-empty { font-size: 0.75rem; color: var(--muted); }
+
+  /* Outcome tiles — what the finished posts actually produced */
+  .outcome-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.3rem; margin-bottom: 0.9rem; }
+  .outcome {
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 0.35rem 0.2rem; text-align: center; background: var(--bg);
+  }
+  .outcome .n { display: block; font-size: 0.95rem; font-weight: 600; line-height: 1.2; }
+  .outcome .l { display: block; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
+  .outcome.good .n { color: var(--success); }
+  .outcome.warn .n { color: #b8860b; }
+  .outcome.bad  .n { color: var(--error); }
+  .outcome.dim  .n { color: var(--muted); }
+
+  /* Activity feed */
+  .trace-log {
+    max-height: 15rem; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg); padding: 0.35rem 0.45rem;
+    display: flex; flex-direction: column; gap: 0.12rem;
+  }
+  .trace {
+    font-size: 0.7rem; line-height: 1.35; word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .trace .t { color: var(--muted); margin-right: 0.3rem; }
+  .trace-contact { color: var(--success); }
+  .trace-captcha, .trace-burn { color: #b8860b; }
+  .trace-drop, .trace-error { color: var(--error); }
+  .trace-retry, .trace-wait, .trace-empty { color: var(--muted); }
+  .trace-pool, .trace-phase { color: var(--accent); }
+  .trace-saved { color: var(--success); opacity: 0.85; }
+
+  /* ── Dropdown multi-selects (areas, sections) ────────────────── */
+  .picker-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+  .multiselect { position: relative; }
+  .ms-toggle {
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.45rem 0.7rem; font-size: 0.875rem; min-width: 11rem;
+    justify-content: space-between;
+  }
+  .ms-toggle:hover { background: var(--bg); border-color: var(--accent); }
+  .ms-count {
+    background: var(--accent); color: #fff; border-radius: 999px;
+    font-size: 0.7rem; padding: 0.05rem 0.4rem; min-width: 1.3rem; text-align: center;
+  }
+  .ms-count.empty { background: var(--border); color: var(--muted); }
+  .ms-caret { color: var(--muted); font-size: 0.7rem; }
+  .ms-panel {
+    position: absolute; z-index: 50; top: calc(100% + 0.3rem); left: 0;
+    width: 17rem; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 9px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+    padding: 0.5rem;
+  }
+  .ms-panel[hidden] { display: none; }
+  .ms-add { display: flex; gap: 0.35rem; }
+  .ms-add input {
+    flex: 1; min-width: 0; padding: 0.35rem 0.5rem; font-size: 0.85rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text);
+  }
+  .ms-add button {
+    padding: 0.35rem 0.7rem; font-size: 0.8rem; border-radius: 6px; flex: none;
+  }
+  .ms-error { color: var(--error); font-size: 0.72rem; min-height: 0.95rem; padding: 0.1rem 0.1rem 0; }
+  .ms-tools { display: flex; gap: 0.3rem; padding: 0.25rem 0.1rem 0.4rem; }
+  .ms-tools button {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 5px; padding: 0.1rem 0.45rem; font-size: 0.7rem;
+  }
+  .ms-tools button:hover { background: var(--bg); color: var(--text); }
+  .ms-list {
+    max-height: 15rem; overflow-y: auto;
+    border-top: 1px solid var(--border); padding-top: 0.35rem;
+    display: flex; flex-direction: column;
+  }
+  .ms-item {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.28rem 0.35rem; border-radius: 6px;
+    font-size: 0.85rem; cursor: pointer; margin: 0;
+    color: var(--text);
+  }
+  .ms-item:hover { background: var(--bg); }
+  .ms-item input { width: 15px; height: 15px; flex: none; margin: 0; }
+  .ms-item .ms-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ms-item .ms-sub { color: var(--muted); font-size: 0.72rem; flex: none; }
+  .ms-item .ms-remove {
+    background: transparent; border: none; color: var(--muted);
+    font-size: 0.95rem; line-height: 1; padding: 0 0.15rem; flex: none; cursor: pointer;
+  }
+  .ms-item .ms-remove:hover { background: transparent; color: var(--error); }
+  .ms-empty { color: var(--muted); font-size: 0.78rem; padding: 0.4rem 0.35rem; }
   h1 { font-size: 1.4rem; margin: 0; }
   h2 { font-size: 1rem; margin: 0 0 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
   section {
@@ -73,6 +240,9 @@
   }
   button.secondary:hover { background: rgba(192, 57, 43, 0.1); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* Buttons set display:inline-flex above, which outranks the UA sheet's
+     [hidden] { display: none } — without this, hidden buttons still show. */
+  [hidden] { display: none !important; }
   label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; color: var(--muted); }
   .field { margin-bottom: 1rem; }
   input[type="text"], select, textarea {
@@ -141,30 +311,6 @@
     max-height: 240px;
     overflow: auto;
   }
-.tag-container {
-    display: flex; flex-wrap: wrap; gap: 0.4rem;
-    min-height: 2rem; margin-bottom: 0.5rem;
-  }
-  .area-tag {
-    display: inline-flex; align-items: center; gap: 0.3rem;
-    background: var(--accent); color: #fff;
-    font-size: 0.8rem; padding: 0.2rem 0.5rem;
-    border-radius: 999px;
-  }
-  .area-tag button {
-    background: none; border: none; color: #fff;
-    font-size: 1rem; line-height: 1; cursor: pointer;
-    padding: 0; margin: 0;
-  }
-  .area-input-row { display: flex; gap: 0.5rem; align-items: flex-start; }
-  .area-input-row input {
-    flex: 0 0 240px; padding: 0.4rem 0.6rem;
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg); color: var(--text); font-size: 0.9rem;
-  }
-  .area-input-row .tag-container {
-    flex: 1; margin-bottom: 0; min-height: 2.2rem;
-  }
   #research-modal { display: none; position: fixed; inset: 0;
     background: rgba(0,0,0,0.5); z-index: 100; overflow-y: auto; padding: 2rem 1rem; }
   #research-modal.open { display: block; }
@@ -173,6 +319,7 @@
 </style>
 </head>
 <body>
+<div class="layout">
 <main>
   <h1>Autoemail — Bulk Draft Creator</h1>
 
@@ -215,59 +362,53 @@
   <section>
   <h2>Craigslist Contact Scraper</h2>
 
-  <!-- Area tag input -->
-  <label style="font-size:0.875rem;color:var(--muted);display:block;margin-bottom:0.4rem;">
-    Areas — type a subdomain code and press Enter or click Add
-  </label>
-  <div id="area-tags" class="tag-container"></div>
-  <div class="area-input-row">
-    <input
-      id="area-input"
-      list="area-suggestions"
-      placeholder="e.g. sfbay, newyork, chicago…"
-      autocomplete="off"
-    />
-    <datalist id="area-suggestions">
-      <option value="sfbay"></option>
-      <option value="losangeles"></option>
-      <option value="newyork"></option>
-      <option value="chicago"></option>
-      <option value="seattle"></option>
-      <option value="boston"></option>
-      <option value="denver"></option>
-      <option value="atlanta"></option>
-      <option value="miami"></option>
-      <option value="dallas"></option>
-      <option value="houston"></option>
-      <option value="phoenix"></option>
-      <option value="portland"></option>
-      <option value="sandiego"></option>
-      <option value="sacramento"></option>
-      <option value="minneapolis"></option>
-      <option value="philadelphia"></option>
-      <option value="austin"></option>
-      <option value="lasvegas"></option>
-      <option value="raleigh"></option>
-      <option value="nashville"></option>
-      <option value="detroit"></option>
-      <option value="cleveland"></option>
-      <option value="pittsburgh"></option>
-    </datalist>
-    <button type="button" id="area-add-btn" class="secondary">Add</button>
-    <div id="area-tags" class="tag-container"></div>
+  <!-- Areas and sections: only what's ticked in these gets scraped. -->
+  <div class="picker-row">
+    <div class="multiselect" id="area-select">
+      <button type="button" class="ms-toggle" id="area-toggle" aria-expanded="false">
+        <span class="ms-label">Areas</span>
+        <span class="ms-count" id="area-count">0</span>
+        <span class="ms-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="ms-panel" id="area-panel" hidden>
+        <!-- Add sits at the top of the dropdown: new areas join the list and
+             arrive already ticked, since adding one is how you say you want it. -->
+        <div class="ms-add">
+          <input id="area-input" type="text" placeholder="add area, e.g. sfbay" autocomplete="off" />
+          <button type="button" id="area-add-btn">Add</button>
+        </div>
+        <div class="ms-error" id="area-add-error"></div>
+        <div class="ms-tools">
+          <button type="button" data-all="area">All</button>
+          <button type="button" data-none="area">None</button>
+        </div>
+        <div class="ms-list" id="area-list"></div>
+      </div>
+    </div>
+
+    <div class="multiselect" id="cat-select">
+      <button type="button" class="ms-toggle" id="cat-toggle" aria-expanded="false">
+        <span class="ms-label">Sections</span>
+        <span class="ms-count" id="cat-count">0</span>
+        <span class="ms-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="ms-panel" id="cat-panel" hidden>
+        <div class="ms-tools">
+          <button type="button" data-all="cat">All</button>
+          <button type="button" data-none="cat">None</button>
+        </div>
+        <div class="ms-list" id="cat-list"></div>
+      </div>
+    </div>
   </div>
 
-  <!-- Sections are chosen server-side; see CATEGORIES in .env.example. -->
-  <div style="font-size:0.875rem;color:var(--muted);margin:0.75rem 0 0.3rem;">
-    Scrapes <strong>resumes</strong>, <strong>services</strong> and
-    <strong>for sale</strong> — people offering themselves or their goods —
-    limited to listings <strong>posted today</strong>.
-  </div>
+  <div class="hint" id="picker-summary" style="margin-top:0.5rem;"></div>
 
   <div style="margin-top:0.75rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
     <button id="research-submit-btn" type="button">Start Scraping</button>
+    <button id="research-stop-btn" type="button" class="secondary" hidden>Stop</button>
     <span style="font-size:0.8rem;color:var(--muted);">
-      Launches browser, browses each area's listings, and extracts contact info.
+      Only ticked areas and sections are searched · listings <strong>posted today</strong>.
     </span>
   </div>
 
@@ -275,6 +416,12 @@
   <div id="research-results" style="margin-top:0.75rem;display:flex;flex-direction:column;gap:0.4rem;"></div>
 </section>
 </main>
+
+<aside id="live-panel">
+  <h2 style="margin-bottom:0.75rem;">Live status</h2>
+  <div id="live-status"></div>
+</aside>
+</div>
 
 
 

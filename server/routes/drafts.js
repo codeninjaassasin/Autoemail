@@ -1,5 +1,6 @@
 const express = require('express');
 const store = require('../store');
+const contactStore = require('../workers/contactStore');
 const googleProvider = require('../providers/googleProvider');
 const microsoftProvider = require('../providers/microsoftProvider');
 
@@ -77,6 +78,10 @@ router.post('/', async (req, res) => {
       });
     }
   }
+
+  // Only the ones a draft actually exists for. A failed send leaves the
+  // address pending, which is what you want — it still needs writing to.
+  contactStore.markDrafted(results.filter((r) => r.success).map((r) => r.recipient));
 
   res.json({ results });
 });

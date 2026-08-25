@@ -12,7 +12,11 @@ const path = require('path');
  * from a mostly-dead public list every run.
  */
 
-const STORE_DIR = path.join(__dirname, '..', '..', 'data');
+// Overridable so the tests can point at a scratch directory. They didn't:
+// every test began by deleting this file, which meant running the suite wiped
+// the real store — a run's worth of proven proxies gone, and the next run
+// paying for a full cold sweep to rediscover them.
+const STORE_DIR = process.env.PROXY_STORE_DIR || path.join(__dirname, '..', '..', 'data');
 const STORE_FILE = path.join(STORE_DIR, 'proxies.json');
 
 // Blocks tolerated before a proxy is dropped. Challenges happen to good
