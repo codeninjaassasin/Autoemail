@@ -1,0 +1,11 @@
+node_modules/
+.env
+.DS_Store
+
+# Runtime data: scraped contacts (personal data), OAuth tokens, proxy pools,
+# and their backups/archives. The app recreates data/ files on demand.
+data/
+
+# Logs / throwaway test scripts
+*.log
+_*.js
