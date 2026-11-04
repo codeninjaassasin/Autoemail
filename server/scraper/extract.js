@@ -32,6 +32,18 @@ function phonesFrom(text) {
   return dedupe(out);
 }
 
+// Posted date from a listing page: `posted: <time datetime="2026-09-15T12:37:54-0500">`.
+// (A separate `updated:` time may follow — ignore it.) Returns ISO 8601 or null.
+function postedFromHtml(html) {
+  const s = String(html || '');
+  const m =
+    s.match(/posted:\s*<time[^>]*datetime=["']([^"']+)["']/i) ||
+    s.match(/<time[^>]*class=["'][^"']*timeago[^"']*["'][^>]*datetime=["']([^"']+)["']/i);
+  if (!m) return null;
+  const d = new Date(m[1].replace(/([+-]\d{2})(\d{2})$/, '$1:$2')); // -0500 -> -05:00
+  return isNaN(d) ? null : d.toISOString();
+}
+
 // A Craigslist reply relay address, e.g. abc-123@job.craigslist.org.
 function relayFrom(emails) {
   return emails.find((e) => /craigslist\.org$/i.test(e)) || null;
@@ -41,4 +53,4 @@ function dedupe(arr) {
   return [...new Set(arr)];
 }
 
-module.exports = { emailsFrom, phonesFrom, relayFrom, EMAIL_RE, PHONE_RE };
+module.exports = { emailsFrom, phonesFrom, relayFrom, postedFromHtml, EMAIL_RE, PHONE_RE };

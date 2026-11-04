@@ -294,6 +294,24 @@ button.sm { padding: 5px 11px; font-size: 12px; }
 button:disabled { opacity: 0.45; cursor: default; filter: none; }
 .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 
+/* ---------- Relay refresh bar ---------- */
+.refreshbar {
+  display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap;
+  margin-top: 12px; flex: 0 0 auto;
+  font-size: 12.5px; color: var(--muted);
+}
+.refresh-state { font-weight: 600; color: var(--ink-2); }
+.refresh-state.on { color: var(--signal); }
+.refresh-state.bad { color: var(--bad); }
+.refresh-item b {
+  font-family: 'IBM Plex Mono', monospace; font-weight: 500;
+  font-variant-numeric: tabular-nums; color: var(--ink);
+}
+.fresh-badge { display: block; white-space: nowrap; font-weight: 600; }
+.fresh-badge.fresh { color: var(--ok); }
+.fresh-badge.unverified { color: var(--live); }
+.fresh-badge.expired { color: var(--bad); }
+
 /* ---------- Results bar ---------- */
 .resultsbar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -375,6 +393,9 @@ button:disabled { opacity: 0.45; cursor: default; filter: none; }
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden; max-width: 290px; min-width: 170px;
 }
+.posted-date { display: block; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.posted-age { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.posted-none { color: var(--muted); white-space: nowrap; }
 a.title-clamp { color: var(--ink); text-decoration: none; }
 a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
 .note-clamp {
@@ -389,7 +410,7 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
 .relay-copy:hover { border-color: var(--signal); color: var(--signal); }
 .relay-copy:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
 .relay-copy.copied { background: var(--ok-weak); border-color: var(--ok); color: var(--ok); }
-.results-table td:nth-child(6) { white-space: nowrap; font-size: 12px; }
+.results-table td:nth-child(8) { white-space: nowrap; font-size: 12px; } /* other emails */
 .results-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .results-table thead th {
   position: sticky; top: 0; z-index: 1;
@@ -410,7 +431,7 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
   font-size: 12px;
 }
 .del-row:hover { background: var(--bad); color: #fff; border-color: var(--bad); }
-.results-table td:nth-child(5) { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.results-table td:nth-child(7) { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; white-space: nowrap; } /* phones */
 .empty {
   padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13px;
 }

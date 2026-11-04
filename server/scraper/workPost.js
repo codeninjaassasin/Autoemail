@@ -1,6 +1,9 @@
 'use strict';
 
-const { emailsFrom, phonesFrom, relayFrom } = require('./extract');
+const { emailsFrom, phonesFrom, relayFrom, postedFromHtml } = require('./extract');
+
+// A row.note matching this means the exit failed, not the post.
+const NET_ERR = /blocked|403|429|Timeout|net::|listing failed|fetch failed|http [45]/i;
 
 // Relay addresses / nonces contain long hex runs that a phone regex could
 // misread; remove them before phone extraction.
@@ -52,6 +55,7 @@ async function workPost(context, url, opts = {}) {
   const row = {
     url,
     title: '',
+    postedAt: null,
     emails: [],
     phones: [],
     relay: null,
@@ -93,7 +97,8 @@ async function workPost(context, url, opts = {}) {
   try {
     const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: pageTimeoutMs });
     const status = resp ? resp.status() : 0;
-    if (status === 403 || status === 429 || /request has been blocked|been blocked|unusual traffic/i.test(await page.content().catch(() => ''))) {
+    const pageHtml = await page.content().catch(() => '');
+    if (status === 403 || status === 429 || /request has been blocked|been blocked|unusual traffic/i.test(pageHtml)) {
       row.note = `blocked (${status || 'rate-limit'})`;
       return row;
     }
@@ -103,6 +108,7 @@ async function workPost(context, url, opts = {}) {
     }
 
     row.title = (await page.title()).replace(/\s*-\s*craigslist.*$/i, '').trim();
+    row.postedAt = postedFromHtml(pageHtml);
 
     const bodyText = await page
       .locator('#postingbody, section#postingbody, .postingbody')
@@ -205,4 +211,4 @@ async function workPost(context, url, opts = {}) {
   return row;
 }
 
-module.exports = { workPost };
+module.exports = { workPost, NET_ERR };

@@ -335,7 +335,8 @@ async function pollStatus() {
     document.getElementById('t-status').textContent = s.running ? 'running' : 'idle';
     document.getElementById('tracer').classList.toggle('running', !!s.running);
     if (typeof setRunButtons === 'function') setRunButtons(!!s.running);
-    if (s.running && typeof attachEvents === 'function') attachEvents();
+    if ((s.running || s.refresh.running) && typeof attachEvents === 'function') attachEvents();
+    renderRefresh(s.refresh);
     // topbar live strip
     const strip = document.getElementById('livestrip');
     strip.classList.toggle('running', !!s.running);
@@ -370,6 +371,24 @@ async function pollStatus() {
     /* ignore */
   }
 }
+function renderRefresh(r) {
+  const on = r.running && !r.stopping;
+  document.getElementById('refreshToggle').checked = on;
+  const stateEl = document.getElementById('r-state');
+  stateEl.textContent = r.stopping ? 'stopping…' : on ? `${r.activeWorkers}/${r.workers} workers` : r.error ? `stopped: ${r.error}` : 'off';
+  stateEl.classList.toggle('on', on);
+  stateEl.classList.toggle('bad', !on && !!r.error);
+  document.getElementById('r-fresh').textContent = r.counts.fresh;
+  document.getElementById('r-unverified').textContent = r.counts.unverified;
+  document.getElementById('r-expired').textContent = r.counts.expired;
+  document.getElementById('r-unchecked').textContent = r.counts.unchecked;
+  document.getElementById('r-changes').textContent = r.counts.relayChanges;
+  const paused = r.sweep.pausedUntil > Date.now();
+  document.getElementById('r-sweep').textContent = r.sweep.running
+    ? `expiry sweep ${r.sweep.done}/${r.sweep.total}${paused ? ' (paused)' : ''}`
+    : '';
+}
+
 setInterval(pollStatus, 2000);
 pollStatus();
 
@@ -387,9 +406,17 @@ let phoneOnly = !!(prefs.filters && prefs.filters.phoneOnly);
 phoneOnlyEl.checked = phoneOnly;
 const catFilterEl = document.getElementById('catFilter');
 let catFilter = (prefs.filters && prefs.filters.category) || '';
+const freshFilterEl = document.getElementById('freshFilter');
+let freshFilter = (prefs.filters && prefs.filters.freshness) || '';
+freshFilterEl.value = freshFilter;
 function saveFilters() {
-  savePrefs({ filters: { state: stateFilter, city: cityFilter, phoneOnly, category: catFilter } });
+  savePrefs({ filters: { state: stateFilter, city: cityFilter, phoneOnly, category: catFilter, freshness: freshFilter } });
 }
+freshFilterEl.addEventListener('change', () => {
+  freshFilter = freshFilterEl.value;
+  saveFilters();
+  renderRows();
+});
 
 // Category dropdown lists only categories present in the stored results, with counts.
 function rebuildCategoryOptions() {
@@ -478,8 +505,14 @@ function renderRows() {
       (filter === 'all' ? true : filter === 'sent' ? r.sent : !r.sent) &&
       (!effCat || r.category === effCat) &&
       (!phoneOnly || (r.phones && r.phones.length > 0)) &&
+      (!freshFilter || (r.refreshStatus || 'unchecked') === freshFilter) &&
       matchesLocation(r)
-  );
+  ).sort((a, b) => {
+    // Newest posted first; rows without a posted date go last.
+    const ta = a.postedAt ? Date.parse(a.postedAt) : -Infinity;
+    const tb = b.postedAt ? Date.parse(b.postedAt) : -Infinity;
+    return tb - ta;
+  });
   tbody.innerHTML = filtered
     .map((r) => {
       const loc = locOf(r);
@@ -494,8 +527,10 @@ function renderRows() {
       return `<tr>
       <td><input type="checkbox" class="sent-cb" data-id="${r.id}" ${r.sent ? 'checked' : ''} aria-label="Mark sent"/></td>
       <td><span class="loc-name">${esc(loc.name)}</span><span class="loc-sub">${esc(r.area || '')} / ${esc(r.category || '')}</span></td>
+      <td>${fmtPosted(r.postedAt)}</td>
       <td>${post}</td>
       <td>${relay}</td>
+      <td>${fmtChecked(r)}</td>
       <td>${(r.phones || []).map(fmtPhone).join('<br>')}</td>
       <td>${others.map(esc).join('<br>')}</td>
       <td><span class="note-clamp">${r.captchaBlocked ? 'captcha ' : ''}${esc(r.note || '')}</span></td>
@@ -544,10 +579,42 @@ function renderRows() {
   if (empty) {
     empty.hidden = filtered.length > 0;
     empty.textContent = rows.length
-      ? 'No contacts match these filters. Clear the category, state, city or Has phone filter to see all.'
+      ? 'No contacts match these filters. Clear the category, state, city, freshness or Has phone filter to see all.'
       : 'No contacts yet. Pick areas and start a scrape — only posts with a contact land here.';
   }
 }
+// Posted date: "Sep 15" (+ year if not this year), age underneath, full time on hover.
+function fmtPosted(iso) {
+  if (!iso) return '<span class="posted-none">–</span>';
+  const d = new Date(iso);
+  if (isNaN(d)) return '<span class="posted-none">–</span>';
+  const now = new Date();
+  const opts = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+  const days = Math.floor((now - d) / 86400000);
+  const age = days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`;
+  return `<span class="posted-date" title="${esc(d.toLocaleString())}">${esc(d.toLocaleDateString(undefined, opts))}</span><span class="posted-age">${age}</span>`;
+}
+
+// Freshness badge plus the age of the last check; the hover gives relay age.
+function fmtAge(iso) {
+  const mins = Math.floor((Date.now() - new Date(iso)) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
+  const days = Math.floor(mins / 1440);
+  return days === 1 ? '1 day ago' : `${days} days ago`;
+}
+function fmtChecked(r) {
+  if (!r.refreshStatus) return '<span class="posted-none">Not checked</span>';
+  const labels = { fresh: 'Fresh', unverified: 'Unverified', expired: 'Expired' };
+  const hover = r.relayCheckedAt
+    ? `Relay last confirmed ${new Date(r.relayCheckedAt).toLocaleString()}`
+    : 'Relay never confirmed from a live page';
+  const age = r.checkedAt ? `<span class="posted-age">${fmtAge(r.checkedAt)}</span>` : '';
+  return `<span class="fresh-badge ${esc(r.refreshStatus)}" title="${esc(hover)}">${esc(labels[r.refreshStatus] || r.refreshStatus)}</span>${age}`;
+}
+
 // "473b978176cb370cafac3287d23f8c53@res.craigslist.org" -> "473b97…8c53@res.craigslist.org"
 function shortRelay(addr) {
   const [local, domain] = String(addr).split('@');
@@ -684,8 +751,26 @@ function handleEvent(e) {
     addLog(`retry #${e.attempt} (${e.reason}): ${e.url}`);
   } else if (e.type === 'dropped') {
     addLog(`dropped (${e.reason || ''}): ${e.url}`);
+  } else if (e.type === 'contacts-updated') {
+    loadContacts();
   } else if (e.type === 'warn') {
     addLog(`WARN: ${e.message}`);
+  } else if (e.type === 'refresh-started') {
+    addLog(`Refresh started: ${e.workers} workers, up to ${e.maxProxiesPerPost} proxies per post.`);
+  } else if (e.type === 'refresh-stopped') {
+    addLog(`Refresh stopped. ${e.confirmed} same, ${e.changed} changed, ${e.unverified} unverified, ${e.expired} expired, ${e.attempts} attempts.`);
+    loadContacts();
+  } else if (e.type === 'refresh-sweep') {
+    if (e.phase === 'start') addLog(`Refresh sweep: checking ${e.total} listings for expiry.`);
+    else addLog(`Refresh sweep ${e.phase}: ${e.done}/${e.total} checked, ${e.expired} expired.`);
+  } else if (e.type === 'refresh-result') {
+    const words = {
+      confirmed: `relay same (${e.tried} proxies)`,
+      changed: `RELAY CHANGED ${e.from} to ${e.to} (${e.tried} proxies)`,
+      unverified: `unverified after ${e.tried} proxies`,
+      expired: 'expired',
+    };
+    addLog(`refresh: ${words[e.outcome]}: ${e.url}`);
   } else if (e.type !== 'collected') {
     addLog(JSON.stringify(e));
   }
@@ -741,6 +826,31 @@ document.getElementById('startScrape').addEventListener('click', async () => {
 document.getElementById('stopScrape').addEventListener('click', async () => {
   await fetch('/api/scrape/stop', { method: 'POST' });
   addLog('Stop requested…');
+});
+
+// Relay refresh: its own switch, independent of Start/Stop. It reuses the run
+// parameters above, but never the Workers field (it always runs 3 workers).
+document.getElementById('refreshToggle').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  e.target.disabled = true;
+  try {
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+    if (on) {
+      opts.body = JSON.stringify({
+        headless: document.getElementById('headless').checked,
+        maxProxiesPerPost: document.getElementById('maxProxiesPerPost').value,
+        replyWaitMs: (Number(document.getElementById('replyWait').value) || 25) * 1000,
+        pageTimeoutMs: Math.max(0, Number(document.getElementById('pageTimeout').value) || 0) * 1000,
+      });
+    }
+    const r = await fetch(`/api/refresh/${on ? 'start' : 'stop'}`, opts);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) alert(data.error || 'Could not change the refresh switch.');
+    attachEvents();
+  } finally {
+    e.target.disabled = false;
+    pollStatus();
+  }
 });
 
 // On page load: if a run is already going on the server, re-attach to it.

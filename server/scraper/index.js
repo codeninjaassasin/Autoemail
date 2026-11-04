@@ -7,7 +7,8 @@ const proxies = require('../proxies');
 const solver = require('./solver');
 const { fetchFreeProxies } = require('./proxySource');
 const { collectPosts, PER_AREA_CAP } = require('./collectPosts');
-const { workPost } = require('./workPost');
+const { workPost, NET_ERR } = require('./workPost');
+const { makeBroker } = require('./broker');
 
 let currentRunToken = 0;
 let stopRequested = false;
@@ -83,38 +84,6 @@ async function preflightBrowser(headless = config.headless) {
     }
     throw err;
   }
-}
-
-// --- Proxy broker: fresh (never-tried) servers + a relax list (cooled, to be
-// retried when their cooldown expires). No separate liveness check — a worker
-// verifies a proxy by actually using it. ---
-function makeBroker(cooldownMs) {
-  const fresh = [];
-  const relax = []; // { server, readyAt } in ascending readyAt order
-  const known = new Set();
-  return {
-    addFresh(servers) {
-      for (const s of servers) {
-        if (known.has(s)) continue;
-        known.add(s);
-        fresh.push(s);
-      }
-    },
-    // A proxy that failed/was-blocked: cool it, retry later.
-    relaxProxy(server) {
-      relax.push({ server, readyAt: Date.now() + cooldownMs });
-    },
-    // Lease the next proxy to try: a relax-ready one first, else a fresh one.
-    lease() {
-      const now = Date.now();
-      if (relax.length && relax[0].readyAt <= now) return relax.shift().server;
-      if (fresh.length) return fresh.shift();
-      return null;
-    },
-    sizes() {
-      return { fresh: fresh.length, relax: relax.length };
-    },
-  };
 }
 
 // Continuously scrape free proxies into the broker's fresh queue (no verify —
@@ -195,7 +164,7 @@ async function runWorker(ctx, myToken) {
         if (!ctx.useProxies) await workContext.close().catch(() => {});
 
         const gated = row.captchaBlocked;
-        const netErr = /blocked|403|429|Timeout|net::|listing failed|fetch failed|http [45]/i.test(row.note || '');
+        const netErr = NET_ERR.test(row.note || '');
         const proxyWorked = !gated && !netErr; // reached the page cleanly
 
         // --- proxy outcome (sticky): keep a working proxy, relax a bad one ---
@@ -237,11 +206,13 @@ async function runWorker(ctx, myToken) {
         const gone = /http (404|410|401)/i.test(row.note || '');
         const triedCount = item.tried ? item.tried.size : item.attempts;
         if (row.relay || gone || item.terminal) {
+          ctx.pending.delete(item.url); // finished — a later cycle may queue it again
           if (gone || item.terminal === 'duplicate') {
             state.dropped++;
             emit({ type: 'dropped', url: item.url, reason: gone ? 'gone' : item.terminal });
           }
         } else if (triedCount >= ctx.maxProxiesPerPost) {
+          ctx.pending.delete(item.url);
           state.parked++;
           emit({ type: 'parked', url: item.url, tried: triedCount });
         } else {
@@ -327,6 +298,10 @@ async function runForever(params, onEvent = () => {}) {
       queue,
       inFlight: 0,
       collecting: true,
+      // URLs currently queued or in flight. In loop mode a re-scan must not
+      // re-add a post that's still waiting from an earlier cycle (that piled
+      // up 100k+ duplicates and the workers could never catch up).
+      pending: new Set(),
       browser,
       useProxies,
       replyWaitMs,
@@ -370,8 +345,9 @@ async function runForever(params, onEvent = () => {}) {
               }
               let added = 0;
               for (const url of urls) {
-                if (seen.has(url)) continue;
+                if (seen.has(url) || ctx.pending.has(url)) continue;
                 seen.add(url);
+                ctx.pending.add(url);
                 queue.push({ url, area, category, attempts: 0 });
                 added++;
               }

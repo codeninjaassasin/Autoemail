@@ -10,6 +10,7 @@ const googleOauth = require('./oauth/google');
 const microsoftOauth = require('./oauth/microsoft');
 const { createDrafts } = require('./drafts/createDrafts');
 const scraper = require('./scraper');
+const refresher = require('./scraper/refresher');
 const contacts = require('./contacts');
 const proxies = require('./proxies');
 const areas = require('./data/areas');
@@ -99,7 +100,22 @@ app.delete('/api/contacts/:id', (req, res) => {
 });
 
 // --- Tracer / status ---
-app.get('/api/status', (req, res) => res.json(scraper.snapshot()));
+app.get('/api/status', (req, res) => res.json({ ...scraper.snapshot(), refresh: refresher.snapshot() }));
+
+// --- Relay refresh for unsent contacts (separate from the scrape run) ---
+app.post('/api/refresh/start', (req, res) => {
+  const b = req.body || {};
+  const started = refresher.start(
+    { headless: b.headless, replyWaitMs: b.replyWaitMs, pageTimeoutMs: b.pageTimeoutMs, maxProxiesPerPost: b.maxProxiesPerPost },
+    broadcast
+  );
+  if (!started) return res.status(409).json({ ok: false, error: 'Refresh is already running.' });
+  res.json({ ok: true });
+});
+app.post('/api/refresh/stop', (req, res) => {
+  refresher.stop();
+  res.json({ ok: true });
+});
 
 // --- Proxy pool: archive old, build a fresh empty pool, fetch free proxies.
 // Liveness verification happens continuously in the scraper's background
@@ -118,6 +134,57 @@ app.post('/api/proxies/refresh', async (req, res) => {
 });
 
 // --- Contacts: remove phone duplicates ---
+// Backfill `postedAt` for stored contacts that don't have it, by fetching each
+// listing over plain HTTP (no browser). Runs in the background; progress goes
+// to the live trace. Expired listings (404/410) are left blank.
+let backfill = null; // { total, done, filled, gone, failed }
+app.post('/api/contacts/backfill-posted', (req, res) => {
+  if (backfill) return res.status(409).json({ ok: false, error: 'Backfill already running', backfill });
+  const { httpGet } = require('./scraper/httpGet');
+  const { postedFromHtml } = require('./scraper/extract');
+  const todo = contacts.list().filter((r) => !r.postedAt && r.url);
+  backfill = { total: todo.length, done: 0, filled: 0, gone: 0, failed: 0 };
+  res.json({ ok: true, total: todo.length });
+  broadcast({ type: 'warn', message: `Filling posted dates for ${todo.length} contacts…` });
+  (async () => {
+    let i = 0;
+    const worker = async () => {
+      while (i < todo.length) {
+        const r = todo[i++];
+        try {
+          const { status, html } = await httpGet(r.url, { timeout: 30000 });
+          if (status === 404 || status === 410) backfill.gone++;
+          else {
+            const d = postedFromHtml(html);
+            if (d) {
+              r.postedAt = d; // row object lives in the contacts cache
+              backfill.filled++;
+            } else backfill.failed++;
+          }
+        } catch {
+          backfill.failed++;
+        }
+        backfill.done++;
+        if (backfill.done % 25 === 0) {
+          contacts.persist();
+          broadcast({ type: 'warn', message: `Posted dates: ${backfill.done}/${backfill.total} checked, ${backfill.filled} filled` });
+        }
+        await new Promise((ok) => setTimeout(ok, 250));
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    contacts.persist();
+    broadcast({
+      type: 'warn',
+      message: `Posted dates done: ${backfill.filled} filled, ${backfill.gone} listings expired, ${backfill.failed} unreadable.`,
+    });
+    broadcast({ type: 'contacts-updated' });
+    backfill = null;
+  })().catch(() => {
+    backfill = null;
+  });
+});
+
 // Keep only the given categories (?keep=rrr,ggg); delete everything else.
 app.post('/api/contacts/prune', (req, res) => {
   const keep = String(req.query.keep || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -176,9 +243,28 @@ app.get('/api/db-format', (req, res) => {
         captchaBlocked: 'boolean',
         note: 'string',
         sent: 'boolean (manual)',
-        scrapedAt: 'ISOString',
+        scrapedAt: 'ISOString (first time this listing was stored)',
+        postedAt: 'ISOString | null (when the listing was posted on Craigslist)',
+        refreshStatus: '"fresh" | "unverified" | "expired" | absent (not checked yet)',
+        checkedAt: 'ISOString | absent (last check, any outcome)',
+        relayCheckedAt: 'ISOString | absent (last time the relay was read from the live page)',
+        relayChangedAt: 'ISOString | absent (last time the relay was found changed)',
+        relayChanges: 'number | absent (times the relay was found changed)',
+        aliveCheckedAt: 'ISOString | absent (last HTTP sweep that found the listing alive)',
       },
       counts: contacts.count(),
+    },
+    'data/relay-changes.jsonl': {
+      description: 'Append-only log with one line per relay change.',
+      shape: 'JSON Lines',
+      record: {
+        at: 'ISOString',
+        url: 'listing url',
+        from: 'previous relay',
+        to: 'new relay',
+        previousCheckAt: 'ISOString | null (when the previous relay was last confirmed)',
+        source: '"refresh" | "scrape"',
+      },
     },
   });
 });

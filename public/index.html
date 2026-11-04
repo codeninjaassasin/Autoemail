@@ -119,6 +119,20 @@
           </div>
           </details>
 
+          <div class="refreshbar" id="refreshbar">
+            <label class="chkfilter">
+              <input type="checkbox" id="refreshToggle" />
+              <span>Refresh unsent relays</span>
+            </label>
+            <span class="refresh-state" id="r-state">off</span>
+            <span class="refresh-item"><b id="r-fresh">0</b> fresh</span>
+            <span class="refresh-item"><b id="r-unverified">0</b> unverified</span>
+            <span class="refresh-item"><b id="r-expired">0</b> expired</span>
+            <span class="refresh-item"><b id="r-unchecked">0</b> not checked</span>
+            <span class="refresh-item"><b id="r-changes">0</b> relay changes</span>
+            <span class="refresh-item" id="r-sweep"></span>
+          </div>
+
           <div class="resultsbar">
             <div class="filters" role="group" aria-label="Sent status">
               <button class="filter active" data-filter="all">All</button>
@@ -137,6 +151,16 @@
               <span class="sr-only">City or area</span>
               <input id="cityFilter" type="search" placeholder="City or area" autocomplete="off" />
             </label>
+            <label class="locfilter">
+              <span class="sr-only">Relay freshness</span>
+              <select id="freshFilter">
+                <option value="">Any freshness</option>
+                <option value="fresh">Fresh</option>
+                <option value="unverified">Unverified</option>
+                <option value="expired">Expired</option>
+                <option value="unchecked">Not checked</option>
+              </select>
+            </label>
             <label class="chkfilter">
               <input type="checkbox" id="phoneOnly" />
               <span>Has phone</span>
@@ -149,7 +173,7 @@
           <div class="tablewrap">
             <table id="scrapeTable" class="results-table">
               <thead>
-                <tr><th>Sent</th><th>Location</th><th>Post</th><th>Relay email</th><th>Phones</th><th>Other emails</th><th>Note</th><th></th></tr>
+                <tr><th>Sent</th><th>Location</th><th>Posted</th><th>Post</th><th>Relay email</th><th>Checked</th><th>Phones</th><th>Other emails</th><th>Note</th><th></th></tr>
               </thead>
               <tbody></tbody>
             </table>
