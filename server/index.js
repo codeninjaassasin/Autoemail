@@ -117,17 +117,22 @@ app.post('/api/refresh/stop', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Proxy pool: archive old, build a fresh empty pool, fetch free proxies.
-// Liveness verification happens continuously in the scraper's background
-// supplier while a run is active.
+// --- Proxy pool: archive the pool, keep verified proxies (ones that reached a
+// listing in real use), remove unverified ones, and fetch fresh free proxies.
+// ?mode=empty archives and starts an empty pool instead; ?mode=add only adds.
+// New proxies are verified by use while a run is active.
 app.post('/api/proxies/refresh', async (req, res) => {
   try {
     const { fetchFreeProxies } = require('./scraper/proxySource');
-    if (req.query.rebuild !== '0') proxies.rebuild(); // archive old, start empty
+    const mode = req.query.mode || 'keep-verified';
+    let pruned = null;
+    if (mode === 'empty') proxies.rebuild(); // archive old, start empty
+    else if (mode === 'keep-verified') pruned = proxies.pruneUnverified();
     const { proxies: found, perSource } = await fetchFreeProxies();
     const added = proxies.addProxies(found);
     await proxies.flush();
-    res.json({ ok: true, found: found.length, added, perSource, stats: proxies.stats() });
+    scraper.addProxies(found.map((p) => p.server)); // feed a running scrape now
+    res.json({ ok: true, mode, pruned, found: found.length, added, perSource, stats: proxies.stats() });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

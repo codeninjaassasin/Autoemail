@@ -665,7 +665,10 @@ document.getElementById('refreshProxies').addEventListener('click', async (e) =>
   btn.textContent = 'Fetching…';
   try {
     const r = await (await fetch('/api/proxies/refresh', { method: 'POST' })).json();
-    if (r.ok) alert(`Fresh pool built: found ${r.found}, added ${r.added}.\nStored ${r.stats.stored}. Liveness verification runs during scraping.`);
+    if (r.ok) {
+      const p = r.pruned ? `Kept ${r.pruned.kept} verified, removed ${r.pruned.removed} unverified.\n` : '';
+      alert(`${p}Gathered ${r.found} proxies, ${r.added} new.\nStored ${r.stats.stored}. New proxies are verified by use while scraping.`);
+    }
     else alert('Refresh failed: ' + r.error);
   } catch (err) {
     alert('Refresh failed: ' + err.message);

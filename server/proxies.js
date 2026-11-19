@@ -69,6 +69,32 @@ function rebuild() {
   scheduleFlush();
 }
 
+// A proxy is "verified" once it has reached a listing cleanly in real use
+// (markSuccess sets live and counts a success).
+function isVerified(p) {
+  return !!p.live || (p.successes || 0) > 0;
+}
+
+// Archive the current pool to data/proxies.<timestamp>.json, then keep only
+// verified proxies and remove every unverified one. Returns { kept, removed }.
+function pruneUnverified() {
+  load();
+  try {
+    if (fs.existsSync(FILE) && store.proxies.length) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      fs.copyFileSync(FILE, path.join(DATA_DIR, `proxies.${stamp}.json`));
+    }
+  } catch {
+    /* archiving is best-effort */
+  }
+  const before = store.proxies.length;
+  store.proxies = store.proxies.filter(isVerified);
+  buildIndex();
+  dirty = true;
+  scheduleFlush();
+  return { kept: store.proxies.length, removed: before - store.proxies.length };
+}
+
 // Merge proxies. Accepts {server,proto,elite} objects or bare "host:port" /
 // "proto://host:port" strings. Returns how many were newly added.
 function addProxies(list) {
@@ -209,6 +235,7 @@ module.exports = {
   load,
   flush,
   rebuild,
+  pruneUnverified,
   addProxies,
   setLive,
   markSuccess,

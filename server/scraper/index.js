@@ -13,6 +13,8 @@ const { makeBroker } = require('./broker');
 let currentRunToken = 0;
 let stopRequested = false;
 let activeBrowser = null; // the current run's browser, so Stop can abort in-flight pages
+let activeCtx = null; // the current run's context, so new proxies reach its broker
+const PRIORITY_SEED_MS = 30000; // how often verified proxies are pushed to the front
 
 const state = {
   running: false,
@@ -89,8 +91,15 @@ async function preflightBrowser(headless = config.headless) {
 // Continuously scrape free proxies into the broker's fresh queue (no verify —
 // workers prove them by use).
 async function proxyProducer(ctx, myToken) {
+  let lastSeed = 0;
   while (myToken === currentRunToken && !stopRequested) {
     try {
+      // Verified proxies (proven by earlier use) go to the front of the queue.
+      // The broker skips servers it already knows, so this adds only new ones.
+      if (Date.now() - lastSeed >= PRIORITY_SEED_MS) {
+        lastSeed = Date.now();
+        ctx.broker.addPriority(proxies.usable().map((p) => p.server));
+      }
       const { fresh } = ctx.broker.sizes();
       if (fresh < ctx.concurrency * 3) {
         const { proxies: found } = await fetchFreeProxies();
@@ -312,6 +321,7 @@ async function runForever(params, onEvent = () => {}) {
       broker: makeBroker(blockCooldownMs),
     };
 
+    activeCtx = ctx;
     const stopping = () => stopRequested || myToken !== currentRunToken;
     const producerP = useProxies ? proxyProducer(ctx, myToken) : Promise.resolve();
 
@@ -385,6 +395,7 @@ async function runForever(params, onEvent = () => {}) {
   } finally {
     if (browser) await browser.close().catch(() => {});
     if (activeBrowser === browser) activeBrowser = null;
+    if (myToken === currentRunToken) activeCtx = null;
     await proxies.flush();
     if (myToken === currentRunToken) {
       stopRequested = false;
@@ -395,4 +406,9 @@ async function runForever(params, onEvent = () => {}) {
   }
 }
 
-module.exports = { runForever, stop, preflightBrowser, snapshot };
+// Hand newly gathered proxies to a running scrape's broker (no-op when idle).
+function addProxies(servers) {
+  if (activeCtx && activeCtx.useProxies) activeCtx.broker.addFresh(servers);
+}
+
+module.exports = { runForever, stop, preflightBrowser, snapshot, addProxies };
