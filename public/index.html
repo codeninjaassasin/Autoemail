@@ -1,432 +1,232 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Autoemail — Bulk Draft Creator</title>
-<link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet" />
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f7f7f8;
-    --panel: #ffffff;
-    --border: #e0e0e5;
-    --text: #1a1a1e;
-    --muted: #666;
-    --accent: #3a6ff2;
-    --accent-hover: #2c58d0;
-    --success: #1a8a4a;
-    --error: #c0392b;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #17181c;
-      --panel: #212227;
-      --border: #34353b;
-      --text: #eaeaec;
-      --muted: #9a9aa2;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    margin: 0;
-    padding: 2rem 1rem;
-  }
-  /* Two columns: the work on the left, a live readout of the run on the
-     right. The sidebar sticks so it stays visible while the results table
-     grows past the fold — a status panel you have to scroll back up to find
-     is no better than a log line. */
-  .layout {
-    max-width: 1160px;
-    margin: 0 auto;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 330px;
-    gap: 1.5rem;
-    align-items: start;
-  }
-  main {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-  }
-  aside#live-panel {
-    position: sticky;
-    top: 1rem;
-    max-height: calc(100vh - 2rem);
-    overflow-y: auto;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1rem;
-  }
-  @media (max-width: 980px) {
-    .layout { grid-template-columns: minmax(0, 1fr); }
-    aside#live-panel { position: static; max-height: none; }
-  }
-
-  /* Live panel internals */
-  .stat-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.5rem;
-    margin-bottom: 0.9rem;
-  }
-  .stat {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.45rem 0.55rem;
-    background: var(--bg);
-  }
-  .stat .k {
-    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--muted); display: block; margin-bottom: 0.15rem;
-  }
-  .stat .v { font-size: 1.05rem; font-weight: 600; }
-  .stat.wide { grid-column: 1 / -1; }
-  .stat.clickable { cursor: pointer; }
-  .stat.clickable:hover, .stat.clickable:focus-visible {
-    border-color: var(--accent); outline: none;
-  }
-  .stat.clickable:hover .v, .stat.clickable:focus-visible .v { color: var(--accent); }
-  .stat.clickable .k::after { content: ' ▸'; opacity: 0.6; }
-  .stat.wide .v { font-size: 0.9rem; word-break: break-word; }
-  .ip-group { margin-bottom: 0.85rem; }
-  .ip-group > h4 {
-    margin: 0 0 0.35rem; font-size: 0.7rem; text-transform: uppercase;
-    letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
-    display: flex; justify-content: space-between; gap: 0.5rem;
-  }
-  .ip-list {
-    display: flex; flex-wrap: wrap; gap: 0.25rem;
-    max-height: 8.5rem; overflow-y: auto;
-  }
-  .ip {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem; padding: 0.12rem 0.35rem; border-radius: 5px;
-    border: 1px solid var(--border); background: var(--bg); white-space: nowrap;
-  }
-  .ip.working { border-color: var(--success); color: var(--success); }
-  .ip.resting { color: var(--muted); }
-  .ip.penalised { border-color: var(--error); color: var(--error); }
-  .ip.safe { border-color: var(--accent); color: var(--accent); }
-  .ip-empty { font-size: 0.75rem; color: var(--muted); }
-
-  /* Outcome tiles — what the finished posts actually produced */
-  .outcome-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.3rem; margin-bottom: 0.9rem; }
-  .outcome {
-    border: 1px solid var(--border); border-radius: 7px;
-    padding: 0.35rem 0.2rem; text-align: center; background: var(--bg);
-  }
-  .outcome .n { display: block; font-size: 0.95rem; font-weight: 600; line-height: 1.2; }
-  .outcome .l { display: block; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
-  .outcome.good .n { color: var(--success); }
-  .outcome.warn .n { color: #b8860b; }
-  .outcome.bad  .n { color: var(--error); }
-  .outcome.dim  .n { color: var(--muted); }
-
-  /* Activity feed */
-  .trace-log {
-    max-height: 15rem; overflow-y: auto;
-    border: 1px solid var(--border); border-radius: 7px;
-    background: var(--bg); padding: 0.35rem 0.45rem;
-    display: flex; flex-direction: column; gap: 0.12rem;
-  }
-  .trace {
-    font-size: 0.7rem; line-height: 1.35; word-break: break-word;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .trace .t { color: var(--muted); margin-right: 0.3rem; }
-  .trace-contact { color: var(--success); }
-  .trace-captcha, .trace-burn { color: #b8860b; }
-  .trace-drop, .trace-error { color: var(--error); }
-  .trace-retry, .trace-wait, .trace-empty { color: var(--muted); }
-  .trace-pool, .trace-phase { color: var(--accent); }
-  .trace-saved { color: var(--success); opacity: 0.85; }
-
-  /* ── Dropdown multi-selects (areas, sections) ────────────────── */
-  .picker-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
-  .multiselect { position: relative; }
-  .ms-toggle {
-    display: inline-flex; align-items: center; gap: 0.45rem;
-    background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: 8px;
-    padding: 0.45rem 0.7rem; font-size: 0.875rem; min-width: 11rem;
-    justify-content: space-between;
-  }
-  .ms-toggle:hover { background: var(--bg); border-color: var(--accent); }
-  .ms-count {
-    background: var(--accent); color: #fff; border-radius: 999px;
-    font-size: 0.7rem; padding: 0.05rem 0.4rem; min-width: 1.3rem; text-align: center;
-  }
-  .ms-count.empty { background: var(--border); color: var(--muted); }
-  .ms-caret { color: var(--muted); font-size: 0.7rem; }
-  .ms-panel {
-    position: absolute; z-index: 50; top: calc(100% + 0.3rem); left: 0;
-    width: 17rem; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 9px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
-    padding: 0.5rem;
-  }
-  .ms-panel[hidden] { display: none; }
-  .ms-add { display: flex; gap: 0.35rem; }
-  .ms-add input {
-    flex: 1; min-width: 0; padding: 0.35rem 0.5rem; font-size: 0.85rem;
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg); color: var(--text);
-  }
-  .ms-add button {
-    padding: 0.35rem 0.7rem; font-size: 0.8rem; border-radius: 6px; flex: none;
-  }
-  .ms-error { color: var(--error); font-size: 0.72rem; min-height: 0.95rem; padding: 0.1rem 0.1rem 0; }
-  .ms-tools { display: flex; gap: 0.3rem; padding: 0.25rem 0.1rem 0.4rem; }
-  .ms-tools button {
-    background: transparent; color: var(--muted); border: 1px solid var(--border);
-    border-radius: 5px; padding: 0.1rem 0.45rem; font-size: 0.7rem;
-  }
-  .ms-tools button:hover { background: var(--bg); color: var(--text); }
-  .ms-list {
-    max-height: 15rem; overflow-y: auto;
-    border-top: 1px solid var(--border); padding-top: 0.35rem;
-    display: flex; flex-direction: column;
-  }
-  .ms-item {
-    display: flex; align-items: center; gap: 0.5rem;
-    padding: 0.28rem 0.35rem; border-radius: 6px;
-    font-size: 0.85rem; cursor: pointer; margin: 0;
-    color: var(--text);
-  }
-  .ms-item:hover { background: var(--bg); }
-  .ms-item input { width: 15px; height: 15px; flex: none; margin: 0; }
-  .ms-item .ms-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ms-item .ms-sub { color: var(--muted); font-size: 0.72rem; flex: none; }
-  .ms-item .ms-remove {
-    background: transparent; border: none; color: var(--muted);
-    font-size: 0.95rem; line-height: 1; padding: 0 0.15rem; flex: none; cursor: pointer;
-  }
-  .ms-item .ms-remove:hover { background: transparent; color: var(--error); }
-  .ms-empty { color: var(--muted); font-size: 0.78rem; padding: 0.4rem 0.35rem; }
-  h1 { font-size: 1.4rem; margin: 0; }
-  h2 { font-size: 1rem; margin: 0 0 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
-  section {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1.25rem;
-  }
-  .accounts-list { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
-  .account-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px;
-  }
-  .account-row .label { font-size: 0.9rem; display: flex; align-items: center; }
-  .account-row input[type="checkbox"] { margin-right: 0.6rem; width: 16px; height: 16px; flex: none; }
-  .account-row .provider-badge {
-    font-size: 0.7rem; text-transform: uppercase; padding: 0.1rem 0.4rem;
-    border-radius: 4px; background: var(--border); margin-right: 0.5rem;
-  }
-  .connect-buttons { display: flex; gap: 0.5rem; }
-  a.btn, button {
-    display: inline-flex; align-items: center; justify-content: center;
-    background: var(--accent); color: white; border: none; border-radius: 8px;
-    padding: 0.55rem 1rem; font-size: 0.9rem; cursor: pointer; text-decoration: none;
-  }
-  a.btn:hover, button:hover { background: var(--accent-hover); }
-  button.secondary, a.btn.secondary {
-    background: transparent; color: var(--error); border: 1px solid var(--border); padding: 0.3rem 0.6rem; font-size: 0.8rem;
-  }
-  button.secondary:hover { background: rgba(192, 57, 43, 0.1); }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  /* Buttons set display:inline-flex above, which outranks the UA sheet's
-     [hidden] { display: none } — without this, hidden buttons still show. */
-  [hidden] { display: none !important; }
-  label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; color: var(--muted); }
-  .field { margin-bottom: 1rem; }
-  input[type="text"], select, textarea {
-    width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg); color: var(--text); font-size: 0.95rem; font-family: inherit;
-  }
-  textarea#recipients { min-height: 90px; resize: vertical; }
-  #editor { min-height: 160px; background: var(--bg); color: var(--text); }
-  .ql-toolbar { border-radius: 6px 6px 0 0; }
-  .ql-container { border-radius: 0 0 6px 6px; font-size: 0.95rem; }
-  .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
-  .validation-errors { color: var(--error); font-size: 0.85rem; margin-top: 0.4rem; }
-  #results { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 1rem; }
-  .result-row { font-size: 0.9rem; padding: 0.4rem 0.6rem; border-radius: 6px; }
-  .result-row.success { background: rgba(26, 138, 74, 0.12); color: var(--success); }
-  .result-row.error { background: rgba(192, 57, 43, 0.12); color: var(--error); }
-  .empty-state { color: var(--muted); font-size: 0.9rem; }
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 1rem;
-    z-index: 1000;
-  }
-  .modal-backdrop.open { display: flex; }
-  .modal {
-    width: min(900px, 100%);
-    max-height: 90vh;
-    overflow: auto;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
-    padding: 1rem;
-  }
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 1rem;
-  }
-  .modal-header h3 { margin: 0; font-size: 1rem; }
-  .modal-close {
-    background: transparent;
-    color: var(--text);
-    border: 1px solid var(--border);
-    padding: 0.35rem 0.7rem;
-  }
-  .modal-results { display: flex; flex-direction: column; gap: 0.75rem; }
-  .modal-card {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 0.9rem;
-    background: var(--bg);
-  }
-  .modal-card h4 { margin: 0 0 0.45rem; font-size: 0.95rem; }
-  .modal-meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; word-break: break-all; }
-  .modal-body {
-    white-space: pre-wrap;
-    font-size: 0.9rem;
-    line-height: 1.45;
-    max-height: 240px;
-    overflow: auto;
-  }
-  #research-modal { display: none; position: fixed; inset: 0;
-    background: rgba(0,0,0,0.5); z-index: 100; overflow-y: auto; padding: 2rem 1rem; }
-  #research-modal.open { display: block; }
-  .modal-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; font-size: 0.875rem; }
-  .modal-meta { color: var(--muted); margin-top: 0.4rem; line-height: 1.7; }
-</style>
-</head>
-<body>
-<div class="layout">
-<main>
-  <h1>Autoemail — Bulk Draft Creator</h1>
-
-  <section id="accounts-section">
-    <h2>Connected Accounts</h2>
-    <div id="accounts-list" class="accounts-list"></div>
-    <div id="account-errors" class="validation-errors"></div>
-    <div class="connect-buttons">
-      <a class="btn" href="/oauth/google/connect">Connect Google Account</a>
-      <a class="btn" href="/oauth/microsoft/connect">Connect Microsoft Account</a>
-    </div>
-  </section>
-
-  <section id="form-section">
-    <h2>Create Drafts</h2>
-    <div class="hint" style="margin-bottom: 1rem;">Recipients are split round-robin across the checked accounts above.</div>
-    <form id="draft-form">
-      <div class="field">
-        <label for="subject">Subject</label>
-        <input type="text" id="subject" required />
-      </div>
-      <div class="field">
-        <label for="editor-label">Mail</label>
-        <div id="editor"></div>
-      </div>
-      <div class="field">
-        <label>Recipients</label>
-        <!-- The scraped table below is the recipient list; there is no second
-             copy to keep in sync. Untick a row to leave it out. -->
-        <div class="hint" id="recipient-summary">
-          Scrape below, then tick the rows you want. Selected addresses become the recipients.
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Autoemail — Lead Ops Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- TOP BAR -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark" aria-hidden="true"></span>
+          <span class="wordmark">autoemail</span>
+          <span class="tagline">lead ops console</span>
         </div>
-        <div id="recipient-errors" class="validation-errors"></div>
-      </div>
-      <button type="submit" id="submit-btn">Create Drafts</button>
-    </form>
-    <div id="results"></div>
-  </section>
-
-  <section>
-  <h2>Craigslist Contact Scraper</h2>
-
-  <!-- Areas and sections: only what's ticked in these gets scraped. -->
-  <div class="picker-row">
-    <div class="multiselect" id="area-select">
-      <button type="button" class="ms-toggle" id="area-toggle" aria-expanded="false">
-        <span class="ms-label">Areas</span>
-        <span class="ms-count" id="area-count">0</span>
-        <span class="ms-caret" aria-hidden="true">▾</span>
-      </button>
-      <div class="ms-panel" id="area-panel" hidden>
-        <!-- Add sits at the top of the dropdown: new areas join the list and
-             arrive already ticked, since adding one is how you say you want it. -->
-        <div class="ms-add">
-          <input id="area-input" type="text" placeholder="add area, e.g. sfbay" autocomplete="off" />
-          <button type="button" id="area-add-btn">Add</button>
+        <div class="livestrip" id="livestrip">
+          <span class="dot" id="bar-dot"></span>
+          <span class="live-state" id="bar-status">idle</span>
+          <span class="live-sep"></span>
+          <span class="live-item"><b id="bar-workers">0/0</b> workers</span>
+          <span class="live-item"><b id="bar-queue">0</b> queued</span>
+          <span class="live-item"><b id="bar-stored">0</b> stored</span>
+          <span class="live-item"><b id="bar-ram">–</b> rss</span>
         </div>
-        <div class="ms-error" id="area-add-error"></div>
-        <div class="ms-tools">
-          <button type="button" data-all="area">All</button>
-          <button type="button" data-none="area">None</button>
-        </div>
-        <div class="ms-list" id="area-list"></div>
-      </div>
+      </header>
+
+      <!-- NAV RAIL -->
+      <nav class="rail tabs">
+        <button data-tab="scraper" class="active" title="Scraper">
+          <span class="ico">⌁</span><span class="lbl">Scraper</span>
+        </button>
+        <button data-tab="drafts" title="Drafts">
+          <span class="ico">✎</span><span class="lbl">Drafts</span>
+        </button>
+        <button data-tab="storage" title="Storage">
+          <span class="ico">▤</span><span class="lbl">Storage</span>
+        </button>
+      </nav>
+
+      <!-- MAIN -->
+      <main class="main">
+        <!-- SCRAPER -->
+        <section id="scraper" class="tab active">
+          <div class="tracerwrap">
+          <div class="tracer compact" id="tracer">
+            <div class="stat stat-lead" id="stat-status">
+              <span class="k">Status</span><span class="v" id="t-status">idle</span>
+            </div>
+            <div class="stat"><span class="k">Workers</span><span class="v mono" id="t-workers">0 / 0</span></div>
+            <div class="stat"><span class="k">Queue pending</span><span class="v mono" id="t-queue">0 / 0</span></div>
+            <div class="stat stat-ok"><span class="k">Stored · contact</span><span class="v mono" id="t-stored">0</span></div>
+            <div class="stat stat-ok"><span class="k">Relays caught</span><span class="v mono" id="t-relays">0</span></div>
+            <div class="stat stat-bad"><span class="k">Gated (captcha)</span><span class="v mono" id="t-gated">0</span></div>
+            <div class="stat"><span class="k">Proxies usable</span><span class="v mono" id="t-proxu">0</span></div>
+            <div class="stat"><span class="k">Attempts</span><span class="v mono" id="t-attempts">0</span></div>
+            <div class="stat"><span class="k">Cycles</span><span class="v mono" id="t-cycles">0</span></div>
+            <div class="stat"><span class="k">Seen (unique)</span><span class="v mono" id="t-seen">0</span></div>
+            <div class="stat"><span class="k">Dropped</span><span class="v mono" id="t-dropped">0</span></div>
+            <div class="stat"><span class="k">Parked</span><span class="v mono" id="t-parked">0</span></div>
+            <div class="stat"><span class="k">Proxies live</span><span class="v mono" id="t-proxlive">0</span></div>
+            <div class="stat"><span class="k">Proxies stored</span><span class="v mono" id="t-proxs">0</span></div>
+            <div class="stat"><span class="k">Proxies cooled</span><span class="v mono" id="t-proxcool">0</span></div>
+            <div class="stat"><span class="k">Proxy fresh q</span><span class="v mono" id="t-proxfresh">0</span></div>
+            <div class="stat"><span class="k">Proxy relax q</span><span class="v mono" id="t-proxrelax">0</span></div>
+            <div class="stat"><span class="k">Solver</span><span class="v" id="t-solver">none</span></div>
+            <div class="stat"><span class="k">Contacts in db</span><span class="v mono" id="t-contacts">0</span></div>
+            <div class="stat"><span class="k">Memory rss</span><span class="v mono" id="t-ram">–</span></div>
+            <div class="stat"><span class="k">Heap used</span><span class="v mono" id="t-heap">–</span></div>
+            <div class="stat"><span class="k">Run uptime</span><span class="v mono" id="t-uptime">–</span></div>
+            <div class="stat"><span class="k">Areas / cats</span><span class="v mono" id="t-scope">–</span></div>
+            <button id="tracerToggle" class="tracer-toggle" type="button" aria-expanded="false">All stats</button>
+          </div>
+          </div>
+
+          <details class="setup" id="setup" open>
+            <summary class="setup-summary">
+              <span class="setup-title">Run setup</span>
+              <span class="run-sentence" id="runSentence">Pick areas and categories to start.</span>
+            </summary>
+          <div class="selectors">
+            <div class="field">
+              <label>Areas</label>
+              <div class="ms" id="ms-areas"></div>
+            </div>
+            <div class="field">
+              <label>Categories</label>
+              <div class="ms" id="ms-categories"></div>
+            </div>
+            <div class="field runparams">
+              <label>Run parameters</label>
+              <div class="param-grid">
+                <label class="p">Query<input id="query" placeholder="optional keywords" /></label>
+                <label class="p">Workers<input id="concurrency" type="number" min="1" max="30" value="10" /></label>
+                <label class="p">Max proxies / post<input id="maxProxiesPerPost" type="number" min="10" max="1000" value="100" /></label>
+                <label class="p">Reply wait (s)<input id="replyWait" type="number" min="4" max="120" value="25" /></label>
+                <label class="p">Page timeout (s, 0 = none)<input id="pageTimeout" type="number" min="0" max="600" value="60" /></label>
+                <label class="p">Loop delay (s)<input id="cycleDelay" type="number" min="5" max="600" value="45" /></label>
+                <label class="p chk"><input type="checkbox" id="loop" /><span>Loop continuously</span></label>
+                <label class="p chk"><input type="checkbox" id="useProxies" /><span>Use proxy pool</span></label>
+                <label class="p chk"><input type="checkbox" id="headless" checked /><span>Headless (uncheck to watch browser)</span></label>
+              </div>
+              <div class="actions">
+                <button id="startScrape" class="primary">Start scraping</button>
+                <button id="stopScrape" class="ghost" disabled>Stop</button>
+                <button id="reloadData" class="ghost">Reload stored data</button>
+                <button id="refreshProxies" class="ghost">Refresh proxies</button>
+                <button id="dedupe" class="ghost">Dedupe phones</button>
+              </div>
+            </div>
+          </div>
+          </details>
+
+          <div class="refreshbar" id="refreshbar">
+            <label class="chkfilter">
+              <input type="checkbox" id="refreshToggle" />
+              <span>Refresh unsent relays</span>
+            </label>
+            <span class="refresh-state" id="r-state">off</span>
+            <span class="refresh-item"><b id="r-fresh">0</b> fresh</span>
+            <span class="refresh-item"><b id="r-unverified">0</b> unverified</span>
+            <span class="refresh-item"><b id="r-expired">0</b> expired</span>
+            <span class="refresh-item"><b id="r-unchecked">0</b> not checked</span>
+            <span class="refresh-item"><b id="r-changes">0</b> relay changes</span>
+            <span class="refresh-item" id="r-sweep"></span>
+          </div>
+
+          <div class="resultsbar">
+            <div class="filters" role="group" aria-label="Sent status">
+              <button class="filter active" data-filter="all">All</button>
+              <button class="filter" data-filter="unsent">Unsent</button>
+              <button class="filter" data-filter="sent">Sent</button>
+            </div>
+            <label class="locfilter">
+              <span class="sr-only">Category</span>
+              <select id="catFilter"><option value="">All categories</option></select>
+            </label>
+            <label class="locfilter">
+              <span class="sr-only">State</span>
+              <select id="stateFilter"><option value="">All states</option></select>
+            </label>
+            <label class="locfilter city">
+              <span class="sr-only">City or area</span>
+              <input id="cityFilter" type="search" placeholder="City or area" autocomplete="off" />
+            </label>
+            <label class="locfilter">
+              <span class="sr-only">Relay freshness</span>
+              <select id="freshFilter">
+                <option value="">Any freshness</option>
+                <option value="fresh">Fresh</option>
+                <option value="unverified">Unverified</option>
+                <option value="expired">Expired</option>
+                <option value="unchecked">Not checked</option>
+              </select>
+            </label>
+            <label class="chkfilter">
+              <input type="checkbox" id="phoneOnly" />
+              <span>Has phone</span>
+            </label>
+            <span id="rowCount" class="rowcount"></span>
+            <button id="logToggle" class="ghost sm" type="button" aria-pressed="true">Hide trace</button>
+          </div>
+
+          <div class="resultsplit" id="resultsplit">
+          <div class="tablewrap">
+            <table id="scrapeTable" class="results-table">
+              <thead>
+                <tr><th>Sent</th><th>Location</th><th>Posted</th><th>Post</th><th>Relay email</th><th>Checked</th><th>Phones</th><th>Other emails</th><th>Note</th><th></th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div id="emptyState" class="empty">No contacts yet. Pick areas and start a scrape — only posts with a contact land here.</div>
+          </div>
+          <aside class="tracepane" aria-label="Live trace">
+            <div class="tracehead">
+              <span>Live trace</span>
+              <button id="logClear" class="ghost sm" type="button">Clear</button>
+            </div>
+            <pre id="scrapeLog" class="tracelog">Waiting for a run…</pre>
+          </aside>
+          </div>
+        </section>
+
+        <!-- DRAFTS -->
+        <section id="drafts" class="tab">
+          <div class="draftgrid">
+            <aside class="acctpanel">
+              <h2>Connected accounts</h2>
+              <ul id="accounts" class="accounts"></ul>
+              <div class="connect">
+                <a href="/connect/google">Connect Gmail</a>
+                <a href="/connect/microsoft">Connect Outlook</a>
+              </div>
+            </aside>
+            <div class="composepanel">
+              <h2>Compose</h2>
+              <label>Subject<input id="subject" type="text" /></label>
+              <label>Body</label>
+              <div id="editor"></div>
+              <label>Recipients<textarea id="recipients" rows="4" placeholder="one per line or comma-separated"></textarea></label>
+              <div class="actions">
+                <button id="create" class="primary">Create drafts</button>
+              </div>
+              <pre id="draftResult" class="result" hidden></pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- STORAGE -->
+        <section id="storage" class="tab">
+          <div class="resultsbar">
+            <h2 class="panel-h">Database storage format</h2>
+            <span class="rowcount">On-disk JSON under data/ · live counts</span>
+            <button id="reloadFormat" class="ghost sm">Refresh</button>
+          </div>
+          <pre id="dbFormat" class="result tall"></pre>
+        </section>
+      </main>
     </div>
 
-    <div class="multiselect" id="cat-select">
-      <button type="button" class="ms-toggle" id="cat-toggle" aria-expanded="false">
-        <span class="ms-label">Sections</span>
-        <span class="ms-count" id="cat-count">0</span>
-        <span class="ms-caret" aria-hidden="true">▾</span>
-      </button>
-      <div class="ms-panel" id="cat-panel" hidden>
-        <div class="ms-tools">
-          <button type="button" data-all="cat">All</button>
-          <button type="button" data-none="cat">None</button>
-        </div>
-        <div class="ms-list" id="cat-list"></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="hint" id="picker-summary" style="margin-top:0.5rem;"></div>
-
-  <div style="margin-top:0.75rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
-    <button id="research-submit-btn" type="button">Start Scraping</button>
-    <button id="research-stop-btn" type="button" class="secondary" hidden>Stop</button>
-    <span style="font-size:0.8rem;color:var(--muted);">
-      Only ticked areas and sections are searched · listings <strong>posted today</strong>.
-    </span>
-  </div>
-
-  <div id="research-errors" style="color:var(--error);font-size:0.875rem;margin-top:0.5rem;"></div>
-  <div id="research-results" style="margin-top:0.75rem;display:flex;flex-direction:column;gap:0.4rem;"></div>
-</section>
-</main>
-
-<aside id="live-panel">
-  <h2 style="margin-bottom:0.75rem;">Live status</h2>
-  <div id="live-status"></div>
-</aside>
-</div>
-
-
-
-
-<script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
-<script src="/app.js"></script>
-</body>
+    <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+    <script src="/app.js"></script>
+  </body>
 </html>

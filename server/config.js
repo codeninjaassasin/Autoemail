@@ -1,33 +1,37 @@
+'use strict';
+
 require('dotenv').config();
 
-const required = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'MICROSOFT_CLIENT_ID', 'MICROSOFT_CLIENT_SECRET'];
-const missing = required.filter((key) => !process.env[key]);
+const PORT = Number(process.env.PORT) || 3000;
+const HEADLESS = process.env.HEADLESS === '1' || process.env.HEADLESS === 'true';
 
-if (missing.length > 0) {
-  console.warn(
-    `Warning: missing env vars: ${missing.join(', ')}. ` +
-      'Copy .env.example to .env and fill in your OAuth credentials before connecting accounts. ' +
-      'See README.md for setup steps.'
-  );
-}
+const base = `http://localhost:${PORT}`;
 
-const port = Number(process.env.PORT) || 3000;
-const baseUrl = `http://localhost:${port}`;
-
-module.exports = {
-  port,
-  baseUrl,
+const config = {
+  port: PORT,
+  headless: HEADLESS,
   google: {
-    clientId: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    redirectUri: `${baseUrl}/oauth/google/callback`,
-    scope: 'https://www.googleapis.com/auth/gmail.compose',
+    clientId: process.env.GOOGLE_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+    redirectUri: `${base}/oauth/google/callback`,
+    scope: ['https://www.googleapis.com/auth/gmail.compose'],
   },
   microsoft: {
-    clientId: process.env.MICROSOFT_CLIENT_ID,
-    clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
-    redirectUri: `${baseUrl}/oauth/microsoft/callback`,
+    clientId: process.env.MICROSOFT_CLIENT_ID || '',
+    clientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
+    redirectUri: `${base}/oauth/microsoft/callback`,
     authority: 'https://login.microsoftonline.com/consumers',
-    scope: 'Mail.ReadWrite offline_access',
+    scope: ['Mail.ReadWrite'],
   },
 };
+
+function missingEnv() {
+  const missing = [];
+  if (!config.google.clientId) missing.push('GOOGLE_CLIENT_ID');
+  if (!config.google.clientSecret) missing.push('GOOGLE_CLIENT_SECRET');
+  if (!config.microsoft.clientId) missing.push('MICROSOFT_CLIENT_ID');
+  if (!config.microsoft.clientSecret) missing.push('MICROSOFT_CLIENT_SECRET');
+  return missing;
+}
+
+module.exports = { ...config, missingEnv };

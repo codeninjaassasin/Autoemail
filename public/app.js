@@ -1,1231 +1,872 @@
+'use strict';
+
+// ---------- Tabs ----------
+document.querySelectorAll('.tabs button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'storage') loadFormat();
+  });
+});
+
+// ---------- Quill ----------
 const quill = new Quill('#editor', { theme: 'snow' });
 
-const accountsListEl = document.getElementById('accounts-list');
-const accountErrorsEl = document.getElementById('account-errors');
-const submitBtn = document.getElementById('submit-btn');
-const recipientErrorsEl = document.getElementById('recipient-errors');
-const resultsEl = document.getElementById('results');
-const form = document.getElementById('draft-form');
-const researchUrlsEl = document.getElementById('research-urls');
-const researchErrorsEl = document.getElementById('research-errors');
-const researchSubmitBtn = document.getElementById('research-submit-btn');
-const researchStopBtn = document.getElementById('research-stop-btn');
-const researchResultsEl = document.getElementById('research-results');
-const liveStatusEl = document.getElementById('live-status');
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PROVIDER_LABELS = { google: 'Google', microsoft: 'Microsoft' };
-
+// ---------- Accounts ----------
 async function loadAccounts() {
-  const res = await fetch('/api/accounts');
-  const accounts = await res.json();
-  renderAccounts(accounts);
-  submitBtn.disabled = accounts.length === 0;
-}
-
-function renderAccounts(accounts) {
-  accountsListEl.innerHTML = '';
-  if (accounts.length === 0) {
-    accountsListEl.innerHTML = '<div class="empty-state">No accounts connected yet.</div>';
+  const list = await (await fetch('/api/accounts')).json();
+  const ul = document.getElementById('accounts');
+  ul.innerHTML = '';
+  if (!list.length) {
+    ul.innerHTML = '<li class="sub">No accounts connected yet.</li>';
     return;
   }
-  for (const account of accounts) {
-    const row = document.createElement('div');
-    row.className = 'account-row';
-    row.innerHTML = `
-      <label class="label">
-        <input type="checkbox" data-account-id="${account.id}" checked />
-        <span class="provider-badge">${PROVIDER_LABELS[account.provider] || account.provider}</span>${account.emailAddress}
-      </label>
-      <button type="button" class="secondary" data-id="${account.id}">Disconnect</button>
-    `;
-    row.querySelector('button').addEventListener('click', () => disconnectAccount(account.id));
-    accountsListEl.appendChild(row);
+  for (const a of list) {
+    const li = document.createElement('li');
+    li.innerHTML = `<input type="checkbox" value="${a.id}" checked />
+      <span class="provider">${a.provider}</span><span>${a.emailAddress}</span>
+      <a href="#" class="del" data-id="${a.id}">remove</a>`;
+    ul.appendChild(li);
   }
-}
-
-function getCheckedAccountIds() {
-  return Array.from(accountsListEl.querySelectorAll('input[type="checkbox"]:checked')).map(
-    (el) => el.dataset.accountId
+  ul.querySelectorAll('.del').forEach((el) =>
+    el.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await fetch(`/api/accounts/${el.dataset.id}`, { method: 'DELETE' });
+      loadAccounts();
+    })
   );
 }
+loadAccounts();
 
-async function disconnectAccount(id) {
-  await fetch(`/api/accounts/${id}/disconnect`, { method: 'POST' });
-  loadAccounts();
-}
-
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  recipientErrorsEl.textContent = '';
-  accountErrorsEl.textContent = '';
-  resultsEl.innerHTML = '';
-
-  const fromAccountIds = getCheckedAccountIds();
-  if (fromAccountIds.length === 0) {
-    accountErrorsEl.textContent = 'Check at least one account to send from.';
-    return;
-  }
-
-  // The scraped table is the recipient list; there is no separate field to
-  // read, so nothing can drift out of sync with what's on screen.
-  const recipients = selectedRecipients().filter((r) => EMAIL_RE.test(r));
-  if (recipients.length === 0) {
-    recipientErrorsEl.textContent =
-      'No recipients selected — scrape below, then tick rows that have an email.';
-    return;
-  }
-
-  const payload = {
-    fromAccountIds,
-    subject: document.getElementById('subject').value,
-    bodyHtml: quill.root.innerHTML,
-    recipients,
-  };
-
-  submitBtn.disabled = true;
-  submitBtn.textContent = 'Creating drafts…';
-
-  try {
-    const res = await fetch('/api/drafts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    const rows = data.results || [{ recipient: '(request)', success: false, error: data.error || 'Unknown error' }];
-    renderResults(rows);
-
-    // Drop the ones that became drafts. Leaving them selected would send a
-    // second draft to the same person on the next click, and the table is the
-    // recipient list — so what's left in it is what still needs writing to.
-    const drafted = rows.filter((r) => r.success).map((r) => String(r.recipient).toLowerCase());
-    for (const e of drafted) draftedEmails.add(e);
-    if (drafted.length) {
-      // Redrawing is enough — the render filters on `draftedEmails`, so a row
-      // whose addresses have all been written to drops out on its own, and one
-      // with an address left keeps it. Pruning `lastResults` as well would
-      // achieve nothing, since the next poll replaces it wholesale anyway.
-      //
-      // In the saved view the server has just moved those addresses out of
-      // pending, so re-read it rather than redrawing a stale list.
-      if (savedView) showSavedContacts(savedView.kind);
-      else renderResearchResults(lastResults, lastProxyCheck, lastProgress);
-      // The counts on the cards changed too.
-      loadContactStore();
-    }
-  } catch (err) {
-    renderResults([{ recipient: '(request)', success: false, error: err.message }]);
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = 'Create Drafts';
-  }
-});
-
-function renderResults(results) {
-  resultsEl.innerHTML = '';
-  for (const r of results) {
-    const row = document.createElement('div');
-    row.className = `result-row ${r.success ? 'success' : 'error'}`;
-    const via = r.accountEmail ? ` (via ${PROVIDER_LABELS[r.provider] || r.provider} — ${r.accountEmail})` : '';
-    row.textContent = r.success
-      ? `✓ ${r.recipient} — Draft created${via}`
-      : `✗ ${r.recipient} — ${r.error}${via}`;
-    resultsEl.appendChild(row);
-  }
-}
-
-// ── Area and section pickers ─────────────────────────────────────
-/**
- * Two checkbox dropdowns. Only what is ticked gets scraped — there is no
- * hidden "all sections" default any more, so the request says exactly what the
- * screen shows.
- *
- * Areas are editable: the Add row at the top of the dropdown appends to the
- * list and ticks the new entry, because adding one is how you say you want it.
- * The list and both selections persist, so a reload doesn't cost you the setup.
- */
-const AREA_SEED = [
-  'sfbay', 'losangeles', 'newyork', 'chicago', 'seattle', 'boston', 'denver',
-  'atlanta', 'miami', 'dallas', 'houston', 'phoenix', 'portland', 'sandiego',
-  'sacramento', 'minneapolis', 'philadelphia', 'austin', 'lasvegas', 'raleigh',
-  'nashville', 'detroit', 'cleveland', 'pittsburgh',
-];
-// Same shape the server validates with (AREA_RE) — rejecting here means a bad
-// code never becomes a request that fails halfway through a run.
-const AREA_RE = /^[a-z0-9-]+$/;
-const LS = { areas: 'autoemail.areas', areaSel: 'autoemail.areasSelected', catSel: 'autoemail.catsSelected' };
-
-const readLS = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-};
-const writeLS = (key, value) => {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
-};
-
-let areaOptions = readLS(LS.areas, AREA_SEED.slice());
-const selectedAreas = new Set(readLS(LS.areaSel, []));
-let catOptions = [];
-const selectedCats = new Set(readLS(LS.catSel, []));
-
-const areaListEl = document.getElementById('area-list');
-const areaCountEl = document.getElementById('area-count');
-const areaInputEl = document.getElementById('area-input');
-const areaAddBtnEl = document.getElementById('area-add-btn');
-const areaAddErrEl = document.getElementById('area-add-error');
-const catListEl = document.getElementById('cat-list');
-const catCountEl = document.getElementById('cat-count');
-const pickerSummaryEl = document.getElementById('picker-summary');
-
-function renderAreaList() {
-  areaListEl.innerHTML = '';
-  if (areaOptions.length === 0) {
-    areaListEl.innerHTML = '<div class="ms-empty">No areas yet — add one above.</div>';
-  }
-  for (const area of areaOptions) {
-    const row = document.createElement('label');
-    row.className = 'ms-item';
-
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = selectedAreas.has(area);
-    cb.addEventListener('change', () => {
-      if (cb.checked) selectedAreas.add(area);
-      else selectedAreas.delete(area);
-      writeLS(LS.areaSel, [...selectedAreas]);
-      updatePickerSummary();
-    });
-
-    const name = document.createElement('span');
-    name.className = 'ms-name';
-    name.textContent = area;
-
-    // Removing takes it off the list entirely; unticking just excludes it from
-    // the next run. Two different intentions, two different controls.
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'ms-remove';
-    del.textContent = '×';
-    del.title = `Remove ${area} from the list`;
-    del.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      areaOptions = areaOptions.filter((a) => a !== area);
-      selectedAreas.delete(area);
-      writeLS(LS.areas, areaOptions);
-      writeLS(LS.areaSel, [...selectedAreas]);
-      renderAreaList();
-      updatePickerSummary();
-    });
-
-    row.append(cb, name, del);
-    areaListEl.appendChild(row);
-  }
-  updatePickerSummary();
-}
-
-function renderCatList() {
-  catListEl.innerHTML = '';
-  if (catOptions.length === 0) {
-    catListEl.innerHTML = '<div class="ms-empty">Loading sections…</div>';
-    return;
-  }
-  for (const cat of catOptions) {
-    const row = document.createElement('label');
-    row.className = 'ms-item';
-
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = selectedCats.has(cat.code);
-    cb.addEventListener('change', () => {
-      if (cb.checked) selectedCats.add(cat.code);
-      else selectedCats.delete(cat.code);
-      writeLS(LS.catSel, [...selectedCats]);
-      updatePickerSummary();
-    });
-
-    const name = document.createElement('span');
-    name.className = 'ms-name';
-    name.textContent = cat.name;
-
-    const code = document.createElement('span');
-    code.className = 'ms-sub';
-    code.textContent = cat.code;
-
-    row.append(cb, name, code);
-    catListEl.appendChild(row);
-  }
-  updatePickerSummary();
-}
-
-function updatePickerSummary() {
-  areaCountEl.textContent = String(selectedAreas.size);
-  areaCountEl.classList.toggle('empty', selectedAreas.size === 0);
-  catCountEl.textContent = String(selectedCats.size);
-  catCountEl.classList.toggle('empty', selectedCats.size === 0);
-
-  if (!pickerSummaryEl) return;
-  if (selectedAreas.size === 0 || selectedCats.size === 0) {
-    pickerSummaryEl.textContent = 'Tick at least one area and one section to scrape.';
-    pickerSummaryEl.style.color = 'var(--muted)';
-    return;
-  }
-  const names = catOptions.filter((c) => selectedCats.has(c.code)).map((c) => c.name);
-  pickerSummaryEl.textContent =
-    `${selectedAreas.size} area${selectedAreas.size === 1 ? '' : 's'} × ` +
-    `${names.length} section${names.length === 1 ? '' : 's'} (${names.join(', ')})`;
-  pickerSummaryEl.style.color = 'var(--muted)';
-}
-
-function addArea(raw) {
-  // Tolerate a pasted URL — "https://sfbay.craigslist.org/..." is the shape
-  // people actually have to hand.
-  const area = String(raw)
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/\.craigslist\.org.*$/, '')
-    .replace(/\/.*$/, '');
-
-  areaAddErrEl.textContent = '';
-  if (!area) return;
-  if (!AREA_RE.test(area)) {
-    areaAddErrEl.textContent = 'Letters, numbers and hyphens only.';
-    return;
-  }
-  if (!areaOptions.includes(area)) {
-    areaOptions.push(area);
-    writeLS(LS.areas, areaOptions);
-  }
-  selectedAreas.add(area);
-  writeLS(LS.areaSel, [...selectedAreas]);
-  areaInputEl.value = '';
-  renderAreaList();
-}
-
-areaAddBtnEl.addEventListener('click', () => addArea(areaInputEl.value));
-areaInputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); addArea(areaInputEl.value); }
-});
-
-// Open/close, and close on any click that isn't inside the dropdown — a panel
-// that only shuts via its own button gets left hanging over the results.
-function wireDropdown(toggleId, panelId) {
-  const toggle = document.getElementById(toggleId);
-  const panel = document.getElementById(panelId);
-  toggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const open = panel.hidden;
-    for (const p of document.querySelectorAll('.ms-panel')) {
-      p.hidden = true;
-      p.previousElementSibling?.setAttribute('aria-expanded', 'false');
-    }
-    panel.hidden = !open;
-    toggle.setAttribute('aria-expanded', String(open));
-  });
-  panel.addEventListener('click', (e) => e.stopPropagation());
-}
-wireDropdown('area-toggle', 'area-panel');
-wireDropdown('cat-toggle', 'cat-panel');
-
-document.addEventListener('click', () => {
-  for (const p of document.querySelectorAll('.ms-panel')) {
-    p.hidden = true;
-    p.previousElementSibling?.setAttribute('aria-expanded', 'false');
-  }
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  for (const p of document.querySelectorAll('.ms-panel')) p.hidden = true;
-});
-
-for (const btn of document.querySelectorAll('[data-all], [data-none]')) {
-  btn.addEventListener('click', () => {
-    const which = btn.dataset.all ?? btn.dataset.none;
-    const selectAll = Boolean(btn.dataset.all);
-    if (which === 'area') {
-      selectedAreas.clear();
-      if (selectAll) for (const a of areaOptions) selectedAreas.add(a);
-      writeLS(LS.areaSel, [...selectedAreas]);
-      renderAreaList();
-    } else {
-      selectedCats.clear();
-      if (selectAll) for (const c of catOptions) selectedCats.add(c.code);
-      writeLS(LS.catSel, [...selectedCats]);
-      renderCatList();
-    }
-  });
-}
-
-/** Sections come from the server so the list can't drift from the scraper's. */
-async function loadCategories() {
-  try {
-    const res = await fetch('/api/research/categories');
-    if (!res.ok) throw new Error('could not load sections');
-    const data = await res.json();
-    catOptions = data.categories ?? [];
-    // First visit only: adopt the server's defaults. After that the user's
-    // choice wins, including a deliberate "none of the defaults".
-    if (localStorage.getItem(LS.catSel) === null) {
-      for (const c of catOptions) if (c.selected) selectedCats.add(c.code);
-      writeLS(LS.catSel, [...selectedCats]);
-    }
-  } catch {
-    catOptions = [];
-  }
-  renderCatList();
-}
-
-// ── Research submit ──────────────────────────────────────────────
-researchSubmitBtn.addEventListener('click', async () => {
-  researchErrorsEl.textContent  = '';
-  researchResultsEl.innerHTML   = '';
-
-  if (selectedAreas.size === 0) {
-    researchErrorsEl.textContent = 'Tick at least one area in the Areas dropdown.';
-    return;
-  }
-  if (selectedCats.size === 0) {
-    researchErrorsEl.textContent = 'Tick at least one section in the Sections dropdown.';
-    return;
-  }
-
-  researchSubmitBtn.disabled    = true;
-  researchSubmitBtn.textContent = 'Scraping…';
-
-  try {
-    const res = await fetch('/api/research/scrape', {
+document.getElementById('create').addEventListener('click', async () => {
+  const accountIds = [...document.querySelectorAll('#accounts input:checked')].map((c) => c.value);
+  const out = document.getElementById('draftResult');
+  out.hidden = false;
+  out.textContent = 'Creating…';
+  const data = await (
+    await fetch('/api/drafts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        areas: Array.from(selectedAreas),
-        // Exactly what's ticked — the server no longer fills in a default set.
-        categories: Array.from(selectedCats),
+        accountIds,
+        subject: document.getElementById('subject').value,
+        bodyHtml: quill.root.innerHTML,
+        recipients: document.getElementById('recipients').value,
       }),
+    })
+  ).json();
+  out.textContent = data.ok
+    ? data.results
+        .map((r) => `${r.ok ? 'OK ' : 'ERR'} ${r.to} via ${r.account}${r.error ? ' — ' + r.error : ''}`)
+        .join('\n')
+    : `Error: ${data.error}`;
+});
+
+// ---------- Multiselect component ----------
+function makeMultiselect(el, items, { valueKey, labelFn, allowAdd, onChange = () => {} }) {
+  const selected = new Set();
+  let all = items.slice();
+  const changed = () => onChange([...selected]);
+
+  el.innerHTML = `
+    <div class="ms-search">
+      <input type="text" placeholder="Search…" />
+      ${allowAdd ? '<button class="ms-add" title="Add custom">+</button>' : ''}
+    </div>
+    <div class="ms-actions">
+      <a href="#" class="ms-all">Select all</a>
+      <a href="#" class="ms-none">Clear</a>
+      <span class="ms-count">0 selected</span>
+    </div>
+    <div class="ms-list"></div>`;
+
+  const search = el.querySelector('.ms-search input');
+  const listEl = el.querySelector('.ms-list');
+  const countEl = el.querySelector('.ms-count');
+
+  function label(it) {
+    return labelFn(it);
+  }
+  function render() {
+    const q = search.value.trim().toLowerCase();
+    // Selected items first so a restored selection is visible at a glance.
+    // (Ticking a box doesn't re-render, so items never jump while clicking.)
+    const shown = all
+      .filter((it) => !q || label(it).toLowerCase().includes(q) || it[valueKey].includes(q))
+      .sort((a, b) => Number(selected.has(b[valueKey])) - Number(selected.has(a[valueKey])));
+    listEl.innerHTML = shown
+      .map((it) => {
+        const v = it[valueKey];
+        return `<label class="ms-item"><input type="checkbox" value="${v}" ${
+          selected.has(v) ? 'checked' : ''
+        }/> ${label(it)}</label>`;
+      })
+      .join('');
+    listEl.querySelectorAll('input').forEach((cb) =>
+      cb.addEventListener('change', () => {
+        cb.checked ? selected.add(cb.value) : selected.delete(cb.value);
+        updateCount();
+        changed();
+      })
+    );
+  }
+  function updateCount() {
+    countEl.textContent = `${selected.size} selected`;
+  }
+
+  search.addEventListener('input', render);
+  el.querySelector('.ms-all').addEventListener('click', (e) => {
+    e.preventDefault();
+    const q = search.value.trim().toLowerCase();
+    all
+      .filter((it) => !q || label(it).toLowerCase().includes(q) || it[valueKey].includes(q))
+      .forEach((it) => selected.add(it[valueKey]));
+    render();
+    updateCount();
+    changed();
+  });
+  el.querySelector('.ms-none').addEventListener('click', (e) => {
+    e.preventDefault();
+    selected.clear();
+    render();
+    updateCount();
+    changed();
+  });
+  if (allowAdd) {
+    el.querySelector('.ms-add').addEventListener('click', () => {
+      const v = (search.value.trim() || prompt('Add area subdomain (e.g. sfbay):') || '').trim();
+      if (!v) return;
+      if (!all.some((it) => it[valueKey] === v)) all.unshift({ [valueKey]: v, name: v + ' (custom)' });
+      selected.add(v);
+      search.value = '';
+      render();
+      updateCount();
+      changed();
     });
-    const data = await res.json();
-    if (!data.jobId) throw new Error(data.error ?? 'Could not start the scrape.');
-
-    currentJobId = data.jobId;
-    researchStopBtn.hidden = false;
-    researchStopBtn.disabled = false;
-    researchStopBtn.textContent = 'Stop';
-
-    await followJob(data.jobId);
-  } catch (err) {
-    renderResearchResults([{ success: false, error: err.message }]);
-  } finally {
-    currentJobId = null;
-    researchStopBtn.hidden = true;
-    researchSubmitBtn.disabled    = false;
-    researchSubmitBtn.textContent = 'Start Scraping';
   }
-});
 
-let currentJobId = null;
-
-/**
- * Asks the server to wind the run down.
- *
- * The button disables itself rather than waiting for a confirmation, because
- * the stop is cooperative — workers finish the post they are on, so there is a
- * gap between asking and stopping that would otherwise look like nothing
- * happened.
- */
-researchStopBtn.addEventListener('click', async () => {
-  if (!currentJobId) return;
-  researchStopBtn.disabled = true;
-  researchStopBtn.textContent = 'Stopping…';
-  try {
-    const res = await fetch(`/api/research/scrape/${currentJobId}/stop`, { method: 'POST' });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      researchErrorsEl.textContent = data.error ?? 'Could not stop the scrape.';
-      // Already finished on its own — the poll will tidy the button up.
-      if (data.status && data.status !== 'running') return;
-      researchStopBtn.disabled = false;
-      researchStopBtn.textContent = 'Stop';
-    }
-  } catch (err) {
-    researchErrorsEl.textContent = err.message;
-    researchStopBtn.disabled = false;
-    researchStopBtn.textContent = 'Stop';
-  }
-});
-
-/**
- * Polls a running scrape and redraws as rows land.
- *
- * An uncapped area is hundreds of listings, so the run outlives any single
- * request — the table fills in progressively rather than appearing at the end,
- * and closing the tab doesn't stop the job.
- */
-async function followJob(jobId) {
-  let seen = -1;
-  traceEvents.length = 0;
-  let sinceEvent = 0;
-
-  for (;;) {
-    // Only the events this page hasn't got yet; the server keeps a ring buffer
-    // and re-sending it whole every two seconds would both waste the response
-    // and make repeats indistinguishable from new activity.
-    const res = await fetch(`/api/research/scrape/${jobId}?sinceEvent=${sinceEvent}`);
-    if (!res.ok) throw new Error((await res.json()).error ?? 'Lost track of the scrape.');
-    const job = await res.json();
-
-    for (const e of job.events ?? []) traceEvents.push(e);
-    if (traceEvents.length > TRACE_LIMIT) traceEvents.splice(0, traceEvents.length - TRACE_LIMIT);
-    sinceEvent = job.eventSeq ?? sinceEvent;
-
-    // The panel is redrawn every poll — exits move in and out of rotation
-    // constantly, and it holds no state of the user's to clobber.
-    renderLiveStatus(job);
-
-    // Redraw only when something changed; the table carries tick state, so
-    // needless redraws would clear selections the user has already made.
-    // While the saved store is on screen, leave the table alone entirely.
-    if (job.completed !== seen && !savedView) {
-      seen = job.completed;
-      renderResearchResults(job.results, job.proxyCheck, {
-        status: job.status,
-        completed: job.completed,
-        planned: job.planned,
-        label: job.currentLabel,
-        elapsedMs: job.elapsedMs,
-      });
-    }
-
-    if (job.status !== 'running') {
-      // One last redraw regardless of the row count, so the final tally shows
-      // the real outcome. Gating on `completed` changing meant a run whose
-      // last poll added no rows kept its "Scraping…" line forever.
-      if (!savedView) {
-        renderResearchResults(job.results, job.proxyCheck, {
-          status: job.status,
-          completed: job.completed,
-          planned: job.planned,
-          label: job.currentLabel,
-          elapsedMs: job.elapsedMs,
-        });
+  render();
+  updateCount();
+  return {
+    values: () => [...selected],
+    // Restore a saved selection. Unknown values are re-added as custom entries.
+    setValues(vals, { silent = true } = {}) {
+      selected.clear();
+      for (const v of vals || []) {
+        if (!all.some((it) => it[valueKey] === v)) {
+          if (!allowAdd) continue;
+          all.unshift({ [valueKey]: v, name: v + ' (custom)' });
+        }
+        selected.add(v);
       }
-      if (job.status === 'failed') researchErrorsEl.textContent = job.error ?? 'Scrape failed.';
-      return;
-    }
-    // Reflect a stop asked for elsewhere — another tab, or a reload mid-run.
-    if (job.stopRequested && !researchStopBtn.disabled) {
-      researchStopBtn.disabled = true;
-      researchStopBtn.textContent = 'Stopping…';
-    }
-    // While stopping, the count that matters is how many posts are still in
-    // flight — that is what the wait is actually bounded by, and watching it
-    // drain is the difference between "winding down" and "hung".
-    const inFlight = job.proxies?.working?.length ?? 0;
-    researchSubmitBtn.textContent = job.stopRequested
-      ? `Stopping… ${inFlight} in flight`
-      : `Scraping… ${job.stats?.finishedPosts ?? job.completed}`;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
-
-// ── Live status panel ────────────────────────────────────────────
-// Accumulated across polls, since each poll only carries what's new.
-const traceEvents = [];
-const TRACE_LIMIT = 400;
-// Kept between polls so the counts don't blank out on a response that
-// predates the first contact.
-let lastContactCounts = null;
-
-/**
- * The right-hand readout of a run in flight.
- *
- * Redrawn on every poll, independently of the results table — the table is
- * only rebuilt when a row lands, because rebuilding it clears tick state, and
- * the exits change far more often than the rows do.
- */
-function renderLiveStatus(job) {
-  const p = job?.proxies ?? { working: [], resting: [], idle: [], safe: [], poolSize: 0 };
-  const s = job?.stats ?? { phase: 'idle', area: null, totalPosts: 0, finishedPosts: 0 };
-
-  liveStatusEl.innerHTML = '';
-
-  const phaseLabels = {
-    starting: 'Starting…',
-    'finding proxies': 'Finding proxies…',
-    'reading listings': 'Reading listings…',
-    scraping: 'Scraping posts…',
-    'waiting for new listings': 'Waiting for new listings…',
-    finished: 'Finished',
-    stopped: 'Stopped',
-    failed: 'Failed',
-    idle: 'Idle — no run yet',
+      render();
+      updateCount();
+      if (!silent) changed();
+    },
   };
-
-  const running = job?.status === 'running';
-  const head = document.createElement('div');
-  head.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:0.7rem;';
-  head.style.color = running ? 'var(--accent)' : 'var(--muted)';
-  head.textContent = job?.stopRequested && running
-    ? `Stopping… ${p.working.length} post${p.working.length === 1 ? '' : 's'} still in flight`
-    : (phaseLabels[s.phase] ?? s.phase);
-  liveStatusEl.appendChild(head);
-
-  // Counters. Total is what the listings queued; finished is what has come
-  // back, however it came back — a post with no contact is still finished.
-  const grid = document.createElement('div');
-  grid.className = 'stat-grid';
-  const stat = (key, value, wide = false, onClick = null) => {
-    const el = document.createElement('div');
-    el.className = wide ? 'stat wide' : 'stat';
-    el.innerHTML = `<span class="k">${escapeHtml(key)}</span><span class="v">${escapeHtml(value)}</span>`;
-    if (onClick) {
-      el.classList.add('clickable');
-      el.tabIndex = 0;
-      el.title = 'Click to list these in the table';
-      el.addEventListener('click', onClick);
-      el.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); }
-      });
-    }
-    grid.appendChild(el);
-  };
-  stat('City', s.area || '—', true);
-  stat('Queued', String(s.queueDepth ?? 0));
-  stat('Finished', String(s.finishedPosts ?? 0));
-  // The run never ends, so these describe how hard it is working rather than
-  // how far through it is — there is no "through".
-  stat('Workers', String(s.workers ?? 0));
-  stat('Free RAM', s.freeMemMB ? `${(s.freeMemMB / 1024).toFixed(1)} GB` : '—');
-
-  // Rate and ETA, from the run's own elapsed time rather than wall clock, so
-  // reopening the page mid-run doesn't restart the measurement.
-  const mins = (job?.elapsedMs ?? 0) / 60000;
-  const rate = mins > 0 ? (s.finishedPosts ?? 0) / mins : 0;
-  const left = Math.max(0, (s.totalPosts ?? 0) - (s.finishedPosts ?? 0));
-  stat('Rate', rate > 0 ? `${rate.toFixed(1)}/min` : '—');
-  stat('ETA', running && rate > 0 && left > 0 ? formatDuration((left / rate) * 60000) : '—');
-
-  // What's on disk, not what's on screen: these keep counting across runs and
-  // survive a restart, which is the whole point of writing them out.
-  const c = job?.contacts ?? lastContactCounts;
-  if (c) {
-    lastContactCounts = c;
-    // Clickable only when there is something to show — a card that opens an
-    // empty table teaches you nothing.
-    stat('Saved emails', `${c.pending} pending`, false,
-      c.pending > 0 ? () => showSavedContacts('emails') : null);
-    stat('Saved phones', String(c.phones), false,
-      c.phones > 0 ? () => showSavedContacts('phones') : null);
-  }
-  liveStatusEl.appendChild(grid);
-
-  // What the finished posts actually produced. "Finished" alone can't tell a
-  // productive run from one that is being challenged on every post.
-  const rows = job?.results ?? [];
-  const tally = { contact: 0, empty: 0, captcha: 0, failed: 0 };
-  let attemptSum = 0;
-  let attemptRows = 0;
-  for (const r of rows) {
-    if (typeof r.attempts === 'number') { attemptSum += r.attempts; attemptRows += 1; }
-    if (!r.success) { tally.failed += 1; continue; }
-    if ((r.contacts?.emails?.length ?? 0) + (r.contacts?.phones?.length ?? 0) > 0) tally.contact += 1;
-    else if (r.captchaBlocked) tally.captcha += 1;
-    else tally.empty += 1;
-  }
-
-  const outcomes = document.createElement('div');
-  outcomes.className = 'outcome-row';
-  const outcome = (label, n, cls, title) => {
-    const el = document.createElement('div');
-    el.className = `outcome ${cls}`;
-    el.title = title;
-    el.innerHTML = `<span class="n">${n}</span><span class="l">${escapeHtml(label)}</span>`;
-    outcomes.appendChild(el);
-  };
-  outcome('contact', tally.contact, 'good', 'Posts that yielded an email or phone');
-  outcome('none', tally.empty, 'dim', 'Reply panel opened and the poster published nothing — a dead post');
-  outcome('captcha', tally.captcha, 'warn', 'Blocked by a challenge on every exit tried');
-  outcome('failed', tally.failed, 'bad', 'Never produced a usable read');
-  liveStatusEl.appendChild(outcomes);
-
-  // Attempts per post is the clearest read on how hard rotation is working:
-  // near 1 means exits are healthy, high means most are being challenged.
-  const avg = document.createElement('div');
-  avg.style.cssText = 'font-size:0.72rem;color:var(--muted);margin:-0.4rem 0 0.85rem;';
-  avg.textContent = attemptRows
-    ? `${(attemptSum / attemptRows).toFixed(1)} exits per post on average`
-    : 'No completed posts yet.';
-  liveStatusEl.appendChild(avg);
-
-  const group = (title, count, items, render) => {
-    const box = document.createElement('div');
-    box.className = 'ip-group';
-    const h = document.createElement('h4');
-    h.innerHTML = `<span>${escapeHtml(title)}</span><span>${count}</span>`;
-    box.appendChild(h);
-    const list = document.createElement('div');
-    list.className = 'ip-list';
-    if (items.length === 0) {
-      const none = document.createElement('span');
-      none.className = 'ip-empty';
-      none.textContent = '—';
-      list.appendChild(none);
-    } else {
-      for (const item of items) list.appendChild(render(item));
-    }
-    box.appendChild(list);
-    liveStatusEl.appendChild(box);
-  };
-
-  const chip = (text, cls, title) => {
-    const el = document.createElement('span');
-    el.className = `ip ${cls}`;
-    el.textContent = text;
-    if (title) el.title = title;
-    return el;
-  };
-
-  // Leased to a worker. A lease is held across many posts now, so the post
-  // count is the useful number — it says how much this exit has earned before
-  // Craigslist noticed it.
-  group('Working now', p.working.length, p.working, (w) =>
-    chip(
-      w.posts > 0 ? `${w.ip || '?'} ·${w.posts}` : (w.ip || '?'),
-      'working',
-      `${w.location || 'Unknown'} — held ${Math.round((w.forMs ?? 0) / 1000)}s, ${w.posts ?? 0} post(s) done`
-    )
-  );
-
-  // Challenged, and sitting out the relaxing period before rejoining the
-  // ready list. Not burned — Craigslist throttles an address that asked too
-  // fast, and the same exit answers again once left alone.
-  group('Relaxing', p.resting.length, p.resting, (r) =>
-    chip(
-      `${r.ip || '?'} ${Math.ceil((r.readyInMs ?? 0) / 60000)}m`,
-      'resting penalised',
-      `${r.location || 'Unknown'} — challenged after ${r.posts ?? 0} post(s), ` +
-        `back in ${Math.ceil((r.readyInMs ?? 0) / 1000)}s`
-    )
-  );
-
-  // No ready list by design — a verified proxy goes straight to a worker.
-  // What queues instead is workers, so that is what gets reported.
-  const waiting = p.waiting ?? 0;
-  const waitBox = document.createElement('div');
-  waitBox.className = 'ip-group';
-  waitBox.innerHTML =
-    `<h4><span>Workers waiting</span><span>${waiting}</span></h4>` +
-    `<div class="ip-empty">${waiting > 0
-      ? 'Queued for the next verified proxy — discovery is the limit.'
-      : 'Every worker has an exit; discovery is keeping up.'}</div>`;
-  liveStatusEl.appendChild(waitBox);
-
-  // The store: exits that have actually produced a contact and survive
-  // restarts. These are the ones worth having.
-  group('Safe (stored)', p.safe.length, p.safe, (e) =>
-    chip(e.ip || '?', 'safe', `${e.location || 'Unknown'} — ${e.successes} success(es), ${e.blocks} block(s)`)
-  );
-
-  // The two subsystems, reported separately — the finder runs whether or not
-  // scraping is making progress, and a stall in one shouldn't look like the
-  // other is broken.
-  const foot = document.createElement('div');
-  foot.style.cssText = 'font-size:0.72rem;color:var(--muted);border-top:1px solid var(--border);padding-top:0.5rem;margin-bottom:0.85rem;line-height:1.5;';
-  const f = job?.finder;
-  const posts = job?.posts;
-  foot.innerHTML =
-    `${p.poolSize} exit${p.poolSize === 1 ? '' : 's'} in rotation` +
-    (p.relaxedCount ? ` · ${p.relaxedCount} relaxed` : '') +
-    (p.returnedCount ? ` (${p.returnedCount} back)` : '') +
-    (p.blockedNow ? ` · ${p.blockedNow} blocked` : '') +
-    (p.blockedForGood ? ` (${p.blockedForGood} for good)` : '') +
-    (p.unblockedCount ? ` · ${p.unblockedCount} retried` : '') +
-    (f ? `<br>finder: ${f.probed ?? 0} probed, ${f.accepted ?? 0} verified` +
-         (f.unclaimed ? `, ${f.unclaimed} unclaimed` : '') +
-         (f.running ? '' : ' (stopped)') : '') +
-    (posts ? `<br>posts: ${posts.scraped} scraped, ${posts.dead} dead` + (posts.gone ? `, ${posts.gone} removed` : "") + (posts.due ? ` · ${posts.due} due re-read` : "") : '') +
-    (s.cycles ? ` · cycle ${s.cycles}` : '');
-  liveStatusEl.appendChild(foot);
-
-  // The activity feed. Everything above is a number; this is the why behind
-  // it — which exit was challenged, what got retried, when the pool was swept.
-  const logBox = document.createElement('div');
-  logBox.className = 'ip-group';
-  const logHead = document.createElement('h4');
-  logHead.innerHTML = `<span>Activity</span><span>${traceEvents.length}</span>`;
-  logBox.appendChild(logHead);
-
-  const log = document.createElement('div');
-  log.className = 'trace-log';
-  if (traceEvents.length === 0) {
-    log.innerHTML = '<span class="ip-empty">Nothing yet.</span>';
-  } else {
-    // Newest first: a feed you have to scroll to the bottom of to see the
-    // latest line is useless while something is going wrong.
-    for (const e of traceEvents.slice(-120).reverse()) {
-      const line = document.createElement('div');
-      line.className = `trace trace-${e.level}`;
-      const t = new Date(e.at).toLocaleTimeString([], { hour12: false });
-      line.innerHTML = `<span class="t">${escapeHtml(t)}</span> ${escapeHtml(e.msg)}`;
-      log.appendChild(line);
-    }
-  }
-  logBox.appendChild(log);
-  liveStatusEl.appendChild(logBox);
 }
 
-/** ms as a compact "4m 12s" / "38s". */
-function formatDuration(ms) {
-  const secs = Math.round(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const m = Math.floor(secs / 60);
-  if (m < 60) return `${m}m ${secs % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
-// ── Result rendering ─────────────────────────────────────────────
-/** Renders an ISO timestamp as a short local date, plus how long ago it was. */
-function formatPosted(iso) {
-  if (!iso) return { text: '—', title: '' };
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return { text: '—', title: String(iso) };
-
-  const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
-  // Age is the point of showing a date here — a listing from March is far
-  // less worth writing to than one from this morning.
-  const age = days <= 0 ? 'today' : days === 1 ? '1d ago' : `${days}d ago`;
-  const text = d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-  return { text: `${text} (${age})`, title: d.toLocaleString() };
-}
-
-/**
- * Run-level readout of which exit IPs were actually used, derived from the
- * rows. Counting posts per IP is the point: it shows whether rotation really
- * happened or the whole run went out through one address.
- */
-/** Pre-scrape proxy check readout: how many were probed, how many usable. */
-function renderProxyCheck(check) {
-  if (!check) return null;
-  const box = document.createElement('div');
-  box.style.cssText =
-    'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);' +
-    'border-radius:8px;font-size:0.8rem;background:var(--bg);';
-
-  if (check.error) {
-    box.style.color = 'var(--error)';
-    box.textContent = `Proxy check failed: ${check.error}`;
-    return box;
-  }
-
-  const secs = check.elapsedMs ? ` in ${(check.elapsedMs / 1000).toFixed(0)}s` : '';
-  const head = document.createElement('div');
-  head.innerHTML =
-    `Proxy check — probed <strong>${check.checked}</strong> of ${check.listSize}${secs}, ` +
-    `<strong>${check.working}</strong> usable`;
-  head.style.color = check.working > 0 ? 'var(--success, #1a8a4a)' : 'var(--error)';
-  box.appendChild(head);
-
-  if (check.working === 0) {
-    const warn = document.createElement('div');
-    warn.style.cssText = 'color:var(--error);margin-top:0.25rem;';
-    warn.textContent = 'No usable proxy — this run went out on your own IP, unrotated.';
-    box.appendChild(warn);
-  } else {
-    for (const p of check.proxies) {
-      const line = document.createElement('div');
-      line.style.color = 'var(--muted)';
-      // Unverified means the echo service was unreachable through that proxy,
-      // so this is its own address rather than a confirmed exit.
-      // The network matters more than the city: Craigslist blocks by ASN, so
-      // an ISP name is a good sign and a hosting one is not.
-      line.innerHTML =
-        `<code>${escapeHtml(p.ip)}</code> — ${escapeHtml(p.location || 'Unknown')}` +
-        (p.org ? ` · ${escapeHtml(p.org.replace(/^AS\d+\s*/, ''))}` : '') +
-        (p.ipVerified === false ? ' <span title="Proxy address; exit IP not confirmed">(unconfirmed)</span>' : '');
-      box.appendChild(line);
-    }
-  }
-  return box;
-}
-
-function renderExitSummary(results) {
-  const byIp = new Map();
-  for (const r of results) {
-    const ip = r.exit?.ip;
-    if (!ip) continue;
-    if (!byIp.has(ip)) byIp.set(ip, { ...r.exit, count: 0 });
-    byIp.get(ip).count += 1;
-  }
-
-  const box = document.createElement('div');
-  box.style.cssText =
-    'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);' +
-    'border-radius:8px;font-size:0.8rem;background:var(--bg);';
-
-  if (byIp.size === 0) {
-    box.style.color = 'var(--muted)';
-    box.textContent = 'No exit IP recorded for this run.';
-    return box;
-  }
-
-  const anyDirect = [...byIp.values()].some((e) => e.direct);
-  const head = document.createElement('div');
-  head.style.cssText = 'color:var(--muted);margin-bottom:0.35rem;';
-  head.textContent = `Exit IPs used — ${byIp.size} address${byIp.size === 1 ? '' : 'es'} across ${results.length} row${results.length === 1 ? '' : 's'}`;
-  box.appendChild(head);
-
-  for (const e of byIp.values()) {
-    const line = document.createElement('div');
-    line.innerHTML =
-      `<code>${escapeHtml(e.ip)}</code> — ${escapeHtml(e.location || 'Unknown')} ` +
-      `<span style="color:var(--muted)">(${e.count} post${e.count === 1 ? '' : 's'})</span>` +
-      (e.direct
-        ? ' <span style="color:var(--error)">direct — no proxy</span>'
-        : ` <span style="color:var(--muted)">via ${escapeHtml(e.server || '')}</span>`);
-    box.appendChild(line);
-  }
-
-  if (anyDirect) {
-    const warn = document.createElement('div');
-    warn.style.cssText = 'color:var(--error);margin-top:0.35rem;';
-    warn.textContent =
-      'Some rows went out on the direct connection — no working proxy was available, so those were not rotated.';
-    box.appendChild(warn);
-  }
-  return box;
-}
-
-function cell(row, html, opts = {}) {
-  const td = document.createElement('td');
-  td.innerHTML = html;
-  if (opts.muted) td.style.color = 'var(--muted)';
-  if (opts.title) td.title = opts.title;
-  td.style.padding = '0.5rem 0.6rem';
-  td.style.borderTop = '1px solid var(--border)';
-  td.style.verticalAlign = 'top';
-  row.appendChild(td);
-  return td;
-}
-
-let lastResults = [];
-let lastProxyCheck = null;
-let lastProgress = null;
-// Non-null while the table is showing the saved store rather than this run's
-// rows. A poll must not redraw over it — the user asked to look at something
-// else, and having it vanish two seconds later would be its own bug.
-let savedView = null;
-
-/**
- * Lists the saved store in the results table.
- *
- * The rows are shaped exactly like scraped ones, so the existing renderer,
- * the tick boxes, the drafted filter and Create Drafts all work unchanged —
- * a saved address is a recipient like any other.
- */
-async function showSavedContacts(kind) {
-  researchErrorsEl.textContent = '';
+// ---------- Saved UI state (localStorage) ----------
+// Area/category selections, run parameters, filters and panel states survive
+// reloads. If a run is active, the server's actual areas/categories win.
+const STORE_KEY = 'autoemail.scraper.v1';
+let prefs = (() => {
   try {
-    const res = await fetch(`/api/research/contacts/${kind}`);
-    if (!res.ok) throw new Error((await res.json()).error ?? 'Could not read the saved contacts.');
-    const data = await res.json();
-
-    const rows = (data.entries ?? []).map((e) => ({
-      success: true,
-      url: e.url,
-      name: e.name,
-      area: e.area,
-      postedAt: e.postedAt,
-      contacts: kind === 'emails'
-        ? { emails: [e.value], phones: [] }
-        : { emails: [], phones: [e.value] },
-    }));
-
-    savedView = { kind, count: rows.length };
-    renderResearchResults(rows, null, null);
-  } catch (err) {
-    researchErrorsEl.textContent = err.message;
+    return JSON.parse(localStorage.getItem(STORE_KEY)) || {};
+  } catch {
+    return {};
+  }
+})();
+let prefsTimer = null;
+function writePrefs() {
+  clearTimeout(prefsTimer);
+  prefsTimer = null;
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(prefs));
+  } catch {
+    /* storage unavailable — selections just won't persist */
   }
 }
-
-function exitSavedView() {
-  savedView = null;
-  renderResearchResults(lastResults, lastProxyCheck, lastProgress);
+function savePrefs(patch) {
+  prefs = { ...prefs, ...patch };
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(writePrefs, 150);
 }
+// Don't lose a pending save if the page is reloaded/closed right after a change.
+window.addEventListener('pagehide', () => {
+  if (prefsTimer) writePrefs();
+});
 
-function renderResearchResults(results, proxyCheck, progress = null) {
-  // Only the live run is cached — caching the saved view here would make
-  // "back to results" restore the very thing you were leaving.
-  if (!savedView) {
-    lastResults = results;
-    lastProxyCheck = proxyCheck;
-    lastProgress = progress;
+const PARAM_VALUES = ['query', 'concurrency', 'maxProxiesPerPost', 'replyWait', 'pageTimeout', 'cycleDelay'];
+const PARAM_CHECKS = ['loop', 'useProxies', 'headless'];
+function readParams() {
+  const p = {};
+  for (const id of PARAM_VALUES) p[id] = document.getElementById(id).value;
+  for (const id of PARAM_CHECKS) p[id] = document.getElementById(id).checked;
+  return p;
+}
+(function restoreParams() {
+  const p = prefs.params || {};
+  for (const id of PARAM_VALUES) if (p[id] !== undefined) document.getElementById(id).value = p[id];
+  for (const id of PARAM_CHECKS) if (p[id] !== undefined) document.getElementById(id).checked = !!p[id];
+  for (const id of [...PARAM_VALUES, ...PARAM_CHECKS]) {
+    const el = document.getElementById(id);
+    const onEdit = () => {
+      savePrefs({ params: readParams() });
+      updateRunSentence();
+    };
+    el.addEventListener('input', onEdit);
+    el.addEventListener('change', onEdit);
   }
-  researchResultsEl.innerHTML = '';
+})();
 
-  if (savedView) {
-    const banner = document.createElement('div');
-    banner.style.cssText =
-      'display:flex;align-items:center;justify-content:space-between;gap:0.75rem;' +
-      'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--accent);' +
-      'border-radius:8px;font-size:0.82rem;background:var(--bg);';
-    const what = savedView.kind === 'emails' ? 'saved email addresses' : 'saved phone numbers';
-    const text = document.createElement('span');
-    text.innerHTML = `Showing <strong>${savedView.count}</strong> ${escapeHtml(what)} from disk.`;
-    const back = document.createElement('button');
-    back.type = 'button';
-    back.className = 'secondary';
-    back.textContent = 'Back to results';
-    back.style.color = 'var(--accent)';
-    back.addEventListener('click', exitSavedView);
-    banner.append(text, back);
-    researchResultsEl.appendChild(banner);
+// ---------- Areas / categories ----------
+const areaMeta = new Map(); // sub -> { name, city, state }
+let catMeta = new Map(); // code -> name
+const STATE_NAMES = {
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado',
+  CT: 'Connecticut', DE: 'Delaware', DC: 'District of Columbia', FL: 'Florida', GA: 'Georgia',
+  HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa', KS: 'Kansas',
+  KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland', MA: 'Massachusetts',
+  MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri', MT: 'Montana',
+  NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey', NM: 'New Mexico',
+  NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio', OK: 'Oklahoma',
+  OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina', SD: 'South Dakota',
+  TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont', VA: 'Virginia', WA: 'Washington',
+  WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+};
+
+let areasMs, catsMs;
+(async () => {
+  const areas = await (await fetch('/api/areas')).json();
+  const cats = await (await fetch('/api/categories')).json();
+  for (const a of areas) areaMeta.set(a.sub, a);
+  catMeta = new Map(cats.map((c) => [c.code, c.name]));
+
+  const persistSelection = () => {
+    savePrefs({ areas: areasMs.values(), categories: catsMs.values() });
+    updateRunSentence();
+  };
+  areasMs = makeMultiselect(document.getElementById('ms-areas'), areas, {
+    valueKey: 'sub',
+    labelFn: (a) => `${a.name} (${a.sub})`,
+    allowAdd: true,
+    onChange: persistSelection,
+  });
+  catsMs = makeMultiselect(document.getElementById('ms-categories'), cats, {
+    valueKey: 'code',
+    labelFn: (c) => `${c.name} [${c.code}] · ${c.group}`,
+    allowAdd: false,
+    onChange: persistSelection,
+  });
+
+  // Restore: server's live run first, else the last saved selection.
+  let live = null;
+  try {
+    const s = await (await fetch('/api/status')).json();
+    if (s.running && s.areas && s.areas.length) live = s;
+  } catch {
+    /* fall back to saved */
   }
+  areasMs.setValues(live ? live.areas : prefs.areas || []); // unknown values come back as custom areas
+  catsMs.setValues(live ? live.categories : prefs.categories || []);
+  updateRunSentence();
+  renderRows(); // location names are available now
+})();
 
-  const checkBox = renderProxyCheck(proxyCheck);
-  if (checkBox) researchResultsEl.appendChild(checkBox);
-
-  const bar = renderProgress(progress);
-  if (bar) researchResultsEl.appendChild(bar);
-
-  // Only listings that can actually be contacted. A row with neither an email
-  // nor a phone has nothing to act on, and this table is the recipient list
-  // now — not a log of everything the scrape touched.
-  const contactable = results.filter(
-    (r) =>
-      r.success &&
-      // Drafted rows leave the list: their addresses have been written to, and
-      // leaving them in invites a second draft to the same person.
-      !isFullyDrafted(r) &&
-      (remainingEmails(r).length > 0 || (r.contacts?.phones?.length ?? 0) > 0)
-  );
-
-  const skipped = results.length - contactable.length;
-  const note = document.createElement('div');
-  note.style.cssText = 'font-size:0.8rem;color:var(--muted);margin-bottom:0.5rem;';
-  if (savedView) {
-    const noLink = contactable.filter((r) => !r.url).length;
-    note.textContent = `${contactable.length} row${contactable.length === 1 ? '' : 's'}` +
-      (skipped ? ` · ${skipped} already drafted, hidden` : '') +
-      (noLink ? ` · ${noLink} saved before links were recorded` : '');
-  } else {
-    note.textContent = contactable.length
-      ? `${contactable.length} contactable listing${contactable.length === 1 ? '' : 's'}` +
-        (skipped ? ` · ${skipped} without contact details, hidden` : '')
-      : `No contactable listings${skipped ? ` — ${skipped} had no contact details` : ''}.`;
-  }
-  researchResultsEl.appendChild(note);
-
-  // The exit readout describes a run; it means nothing for rows read off disk.
-  if (!savedView) researchResultsEl.appendChild(renderExitSummary(results));
-  if (contactable.length === 0) {
-    updateRecipientSummary();
+// The folded setup bar reads as one sentence describing the configured run.
+function updateRunSentence() {
+  const el = document.getElementById('runSentence');
+  if (!el || !areasMs || !catsMs) return;
+  const a = areasMs.values();
+  const c = catsMs.values();
+  if (!a.length) {
+    el.textContent = 'Pick areas and categories to start.';
     return;
   }
+  const esc2 = (s) => String(s).replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
+  const areaPart = a.length <= 2 ? a.map((s) => (areaMeta.get(s) || { city: s }).city).join(' and ') : `${a.length} areas`;
+  const catNames = c.map((code) => String(catMeta.get(code) || code).replace(/^all\s+/i, '').toLowerCase());
+  const catPart = !c.length ? 'for-sale posts' : c.length <= 2 ? catNames.join(' and ') : `${c.length} categories`;
+  const p = readParams();
+  const ipPart = p.useProxies ? 'through the proxy pool' : 'on your own IP';
+  const loopPart = p.loop ? `, repeating every ${p.cycleDelay || 45}s` : ', once';
+  const visPart = p.headless ? '' : ' with the browser visible';
+  el.innerHTML = `Scrape <b>${esc2(catPart)}</b> in <b>${esc2(areaPart)}</b> using <b>${esc2(p.concurrency || 1)} workers</b> ${ipPart}${loopPart}${visPart}.`;
+}
 
-  const table = document.createElement('table');
-  table.style.cssText = 'width:100%;min-width:560px;border-collapse:collapse;font-size:0.85rem;';
+// Setup panel: remember open/closed; folds itself when a run starts.
+const setupEl = document.getElementById('setup');
+if (prefs.setupOpen === false) setupEl.open = false;
+setupEl.addEventListener('toggle', () => savePrefs({ setupOpen: setupEl.open }));
 
-  const thead = document.createElement('thead');
-  const hrow = document.createElement('tr');
-  for (const label of ['', 'Email', 'Phone', 'Posted', 'Link']) {
-    const th = document.createElement('th');
-    th.textContent = label;
-    th.style.cssText =
-      'text-align:left;padding:0.5rem 0.6rem;font-size:0.75rem;text-transform:uppercase;' +
-      'letter-spacing:0.04em;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap;';
-    hrow.appendChild(th);
+// Telemetry strip: compact (one row) or all stats.
+const tracerEl = document.getElementById('tracer');
+const tracerToggle = document.getElementById('tracerToggle');
+function applyTracerMode(full) {
+  tracerEl.classList.toggle('compact', !full);
+  tracerToggle.textContent = full ? 'Fewer stats' : 'All stats';
+  tracerToggle.setAttribute('aria-expanded', String(full));
+}
+applyTracerMode(!!prefs.tracerFull);
+tracerToggle.addEventListener('click', () => {
+  const full = tracerEl.classList.contains('compact');
+  applyTracerMode(full);
+  savePrefs({ tracerFull: full });
+});
+
+// ---------- Tracer ----------
+function fmtBytes(n) {
+  if (!n) return '–';
+  const mb = n / 1048576;
+  return mb > 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+}
+function fmtDur(ms) {
+  if (!ms) return '–';
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return `${h ? h + 'h ' : ''}${m ? m + 'm ' : ''}${s % 60}s`;
+}
+async function pollStatus() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    document.getElementById('t-status').textContent = s.running ? 'running' : 'idle';
+    document.getElementById('tracer').classList.toggle('running', !!s.running);
+    if (typeof setRunButtons === 'function') setRunButtons(!!s.running);
+    if ((s.running || s.refresh.running) && typeof attachEvents === 'function') attachEvents();
+    renderRefresh(s.refresh);
+    // topbar live strip
+    const strip = document.getElementById('livestrip');
+    strip.classList.toggle('running', !!s.running);
+    document.getElementById('bar-status').textContent = s.running ? 'running' : 'idle';
+    document.getElementById('bar-workers').textContent = `${s.activeWorkers}/${s.concurrency}`;
+    document.getElementById('bar-queue').textContent = s.queueRemaining;
+    document.getElementById('bar-stored').textContent = s.stored;
+    document.getElementById('bar-ram').textContent = fmtBytes(s.memory.rss);
+    document.getElementById('t-workers').textContent = `${s.activeWorkers} / ${s.concurrency}`;
+    document.getElementById('t-queue').textContent = `${s.queueRemaining} / ${s.queueTotal}`;
+    document.getElementById('t-attempts').textContent = s.attempts;
+    document.getElementById('t-cycles').textContent = s.cycles ?? 0;
+    document.getElementById('t-seen').textContent = s.seenTotal ?? 0;
+    document.getElementById('t-stored').textContent = s.stored;
+    document.getElementById('t-relays').textContent = s.relaysCaught ?? 0;
+    document.getElementById('t-dropped').textContent = s.dropped;
+    document.getElementById('t-parked').textContent = s.parked ?? 0;
+    document.getElementById('t-gated').textContent = s.gated ?? 0;
+    document.getElementById('t-solver').textContent = s.solver;
+    document.getElementById('t-proxu').textContent = s.proxies.usable ?? 0;
+    document.getElementById('t-proxlive').textContent = s.proxies.live ?? 0;
+    document.getElementById('t-proxs').textContent = s.proxies.stored;
+    document.getElementById('t-proxcool').textContent = s.proxies.cooled ?? 0;
+    document.getElementById('t-proxfresh').textContent = s.proxyFresh ?? 0;
+    document.getElementById('t-proxrelax').textContent = s.proxyRelax ?? 0;
+    document.getElementById('t-contacts').textContent = s.contacts.total;
+    document.getElementById('t-ram').textContent = fmtBytes(s.memory.rss);
+    document.getElementById('t-heap').textContent = fmtBytes(s.memory.heapUsed);
+    document.getElementById('t-uptime').textContent = s.running ? fmtDur(s.uptimeMs) : '–';
+    document.getElementById('t-scope').textContent = `${s.areas.length} / ${s.categories.length}`;
+  } catch {
+    /* ignore */
   }
-  thead.appendChild(hrow);
-  table.appendChild(thead);
+}
+function renderRefresh(r) {
+  const on = r.running && !r.stopping;
+  document.getElementById('refreshToggle').checked = on;
+  const stateEl = document.getElementById('r-state');
+  stateEl.textContent = r.stopping ? 'stopping…' : on ? `${r.activeWorkers}/${r.workers} workers` : r.error ? `stopped: ${r.error}` : 'off';
+  stateEl.classList.toggle('on', on);
+  stateEl.classList.toggle('bad', !on && !!r.error);
+  document.getElementById('r-fresh').textContent = r.counts.fresh;
+  document.getElementById('r-unverified').textContent = r.counts.unverified;
+  document.getElementById('r-expired').textContent = r.counts.expired;
+  document.getElementById('r-unchecked').textContent = r.counts.unchecked;
+  document.getElementById('r-changes').textContent = r.counts.relayChanges;
+  const paused = r.sweep.pausedUntil > Date.now();
+  document.getElementById('r-sweep').textContent = r.sweep.running
+    ? `expiry sweep ${r.sweep.done}/${r.sweep.total}${paused ? ' (paused)' : ''}`
+    : '';
+}
 
-  const tbody = document.createElement('tbody');
-  for (const item of contactable) {
-    // Drafted addresses are dropped from the row, not just from the run: a row
-    // that still has a second address stays, showing only what's left to write.
-    const emails = remainingEmails(item);
-    const phones = item.contacts?.phones ?? [];
-    const row = document.createElement('tr');
+setInterval(pollStatus, 2000);
+pollStatus();
 
-    // Tick box drives the recipient list. Rows with no email are shown for
-    // their phone number but can't be written to, so the box is disabled.
-    const pick = document.createElement('td');
-    pick.style.cssText = 'padding:0.5rem 0.6rem;border-top:1px solid var(--border);vertical-align:top;';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    // Default on, unless this row was deliberately unticked earlier — a
-    // redraw must not re-select something the user removed.
-    cb.checked = emails.length > 0 && !emails.some((e) => untickedEmails.has(e.toLowerCase()));
-    cb.disabled = emails.length === 0;
-    cb.dataset.emails = emails.join(',');
-    cb.title = item.name || '';
-    cb.addEventListener('change', () => {
-      for (const e of emails) {
-        if (cb.checked) untickedEmails.delete(e.toLowerCase());
-        else untickedEmails.add(e.toLowerCase());
+// ---------- Contacts table ----------
+let rows = [];
+let filter = 'all';
+const tbody = document.querySelector('#scrapeTable tbody');
+const stateFilterEl = document.getElementById('stateFilter');
+const cityFilterEl = document.getElementById('cityFilter');
+let stateFilter = (prefs.filters && prefs.filters.state) || '';
+let cityFilter = (prefs.filters && prefs.filters.city) || '';
+cityFilterEl.value = cityFilter;
+const phoneOnlyEl = document.getElementById('phoneOnly');
+let phoneOnly = !!(prefs.filters && prefs.filters.phoneOnly);
+phoneOnlyEl.checked = phoneOnly;
+const catFilterEl = document.getElementById('catFilter');
+let catFilter = (prefs.filters && prefs.filters.category) || '';
+const freshFilterEl = document.getElementById('freshFilter');
+let freshFilter = (prefs.filters && prefs.filters.freshness) || '';
+freshFilterEl.value = freshFilter;
+function saveFilters() {
+  savePrefs({ filters: { state: stateFilter, city: cityFilter, phoneOnly, category: catFilter, freshness: freshFilter } });
+}
+freshFilterEl.addEventListener('change', () => {
+  freshFilter = freshFilterEl.value;
+  saveFilters();
+  renderRows();
+});
+
+// Category dropdown lists only categories present in the stored results, with counts.
+function rebuildCategoryOptions() {
+  const counts = new Map();
+  for (const r of rows) counts.set(r.category || '', (counts.get(r.category || '') || 0) + 1);
+  const codes = [...counts.keys()].filter(Boolean).sort((a, b) =>
+    String(catMeta.get(a) || a).localeCompare(String(catMeta.get(b) || b))
+  );
+  const html = ['<option value="">All categories</option>']
+    .concat(codes.map((c) => `<option value="${esc(c)}">${esc(catMeta.get(c) || c)} (${counts.get(c)})</option>`))
+    .join('');
+  if (catFilterEl.dataset.html !== html) {
+    catFilterEl.innerHTML = html;
+    catFilterEl.dataset.html = html;
+  }
+  catFilterEl.value = catFilter;
+  if (catFilterEl.value !== catFilter) catFilterEl.value = ''; // saved category no longer present
+}
+catFilterEl.addEventListener('change', () => {
+  catFilter = catFilterEl.value;
+  saveFilters();
+  renderRows();
+});
+
+function locOf(r) {
+  const m = areaMeta.get(r.area);
+  return m ? m : { name: r.area || '', city: r.area || '', state: '' };
+}
+
+// State dropdown lists only states present in the stored results, with counts.
+function rebuildStateOptions() {
+  const counts = new Map();
+  for (const r of rows) {
+    const st = locOf(r).state || '';
+    counts.set(st, (counts.get(st) || 0) + 1);
+  }
+  const states = [...counts.keys()].filter(Boolean).sort((a, b) =>
+    (STATE_NAMES[a] || a).localeCompare(STATE_NAMES[b] || b)
+  );
+  const opts = ['<option value="">All states</option>']
+    .concat(states.map((st) => `<option value="${st}">${esc(STATE_NAMES[st] || st)} (${counts.get(st)})</option>`))
+    .concat(counts.has('') ? [`<option value="__other">Other areas (${counts.get('')})</option>`] : []);
+  const html = opts.join('');
+  if (stateFilterEl.dataset.html !== html) {
+    stateFilterEl.innerHTML = html;
+    stateFilterEl.dataset.html = html;
+  }
+  stateFilterEl.value = stateFilter;
+  if (stateFilterEl.value !== stateFilter) stateFilterEl.value = ''; // saved state no longer present
+}
+
+function matchesLocation(r) {
+  const loc = locOf(r);
+  if (stateFilter === '__other') {
+    if (loc.state) return false;
+  } else if (stateFilter && loc.state !== stateFilter) return false;
+  if (cityFilter) {
+    const q = cityFilter.toLowerCase();
+    if (!`${loc.name} ${r.area || ''}`.toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+
+stateFilterEl.addEventListener('change', () => {
+  stateFilter = stateFilterEl.value;
+  saveFilters();
+  renderRows();
+});
+cityFilterEl.addEventListener('input', () => {
+  cityFilter = cityFilterEl.value.trim();
+  saveFilters();
+  renderRows();
+});
+phoneOnlyEl.addEventListener('change', () => {
+  phoneOnly = phoneOnlyEl.checked;
+  saveFilters();
+  renderRows();
+});
+
+function renderRows() {
+  rebuildStateOptions();
+  rebuildCategoryOptions();
+  const effCat = catFilterEl.value; // '' if the saved category isn't present
+  const filtered = rows.filter(
+    (r) =>
+      (filter === 'all' ? true : filter === 'sent' ? r.sent : !r.sent) &&
+      (!effCat || r.category === effCat) &&
+      (!phoneOnly || (r.phones && r.phones.length > 0)) &&
+      (!freshFilter || (r.refreshStatus || 'unchecked') === freshFilter) &&
+      matchesLocation(r)
+  ).sort((a, b) => {
+    // Newest posted first; rows without a posted date go last.
+    const ta = a.postedAt ? Date.parse(a.postedAt) : -Infinity;
+    const tb = b.postedAt ? Date.parse(b.postedAt) : -Infinity;
+    return tb - ta;
+  });
+  tbody.innerHTML = filtered
+    .map((r) => {
+      const loc = locOf(r);
+      const title = esc(r.title || '(untitled)');
+      const post = r.url
+        ? `<a class="title-clamp" href="${esc(r.url)}" target="_blank" rel="noopener" title="${title}">${title}</a>`
+        : `<span class="title-clamp" title="${title}">${title}</span>`;
+      const others = (r.emails || []).filter((e) => e !== r.relay && !/craigslist\.org$/i.test(e));
+      const relay = r.relay
+        ? `<button type="button" class="relay-copy" data-copy="${esc(r.relay)}" title="${esc(r.relay)} — click to copy">${esc(shortRelay(r.relay))}</button>`
+        : '';
+      return `<tr>
+      <td><input type="checkbox" class="sent-cb" data-id="${r.id}" ${r.sent ? 'checked' : ''} aria-label="Mark sent"/></td>
+      <td><span class="loc-name">${esc(loc.name)}</span><span class="loc-sub">${esc(r.area || '')} / ${esc(r.category || '')}</span></td>
+      <td>${fmtPosted(r.postedAt)}</td>
+      <td>${post}</td>
+      <td>${relay}</td>
+      <td>${fmtChecked(r)}</td>
+      <td>${(r.phones || []).map(fmtPhone).join('<br>')}</td>
+      <td>${others.map(esc).join('<br>')}</td>
+      <td><span class="note-clamp">${r.captchaBlocked ? 'captcha ' : ''}${esc(r.note || '')}</span></td>
+      <td><button class="del-row" data-id="${r.id}" title="Delete record" aria-label="Delete record">✕</button></td></tr>`;
+    })
+    .join('');
+  tbody.querySelectorAll('.relay-copy').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        const prev = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = prev;
+          btn.classList.remove('copied');
+        }, 1200);
+      } catch {
+        window.prompt('Copy relay email:', btn.dataset.copy);
       }
-      updateRecipientSummary();
-    });
-    pick.appendChild(cb);
-    row.appendChild(pick);
-
-    cell(row,
-      emails.length
-        ? emails.map((e) =>
-            `<a href="${safeUrl(item.url)}" target="_blank" rel="noopener" title="${escapeHtml(item.name || '')}"` +
-            ` style="color:var(--accent);text-decoration:none;">${escapeHtml(e)}</a>`
-          ).join('<br>')
-        : '—',
-      { muted: emails.length === 0 }
-    );
-
-    cell(row, phones.length ? phones.map(escapeHtml).join('<br>') : '—', { muted: phones.length === 0 });
-
-    const posted = formatPosted(item.postedAt);
-    cell(row, escapeHtml(posted.text), { muted: !item.postedAt, title: posted.title });
-
-    // The listing itself. Saved contacts recorded before provenance existed
-    // have no url — those show a dash rather than a link to nowhere.
-    const href = safeUrl(item.url);
-    cell(
-      row,
-      item.url && href !== '#'
-        ? `<a href="${href}" target="_blank" rel="noopener"` +
-          ` style="color:var(--accent);text-decoration:underline;">link</a>`
-        : '—',
-      { muted: !item.url, title: item.name || '' }
-    );
-
-    tbody.appendChild(row);
+    })
+  );
+  tbody.querySelectorAll('.del-row').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const res = await fetch(`/api/contacts/${btn.dataset.id}`, { method: 'DELETE' });
+      if (!res.ok) return;
+      rows = rows.filter((r) => r.id !== btn.dataset.id);
+      renderRows();
+    })
+  );
+  tbody.querySelectorAll('.sent-cb').forEach((cb) =>
+    cb.addEventListener('change', async () => {
+      await fetch(`/api/contacts/${cb.dataset.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sent: cb.checked }),
+      });
+      const row = rows.find((r) => r.id === cb.dataset.id);
+      if (row) row.sent = cb.checked;
+      renderRows();
+    })
+  );
+  document.getElementById('rowCount').textContent =
+    filtered.length === rows.length ? `${rows.length} contacts` : `${filtered.length} of ${rows.length} contacts`;
+  const empty = document.getElementById('emptyState');
+  if (empty) {
+    empty.hidden = filtered.length > 0;
+    empty.textContent = rows.length
+      ? 'No contacts match these filters. Clear the category, state, city, freshness or Has phone filter to see all.'
+      : 'No contacts yet. Pick areas and start a scrape — only posts with a contact land here.';
   }
-  table.appendChild(tbody);
-
-  const wrap = document.createElement('div');
-  wrap.style.cssText = 'overflow-x:auto;border:1px solid var(--border);border-radius:8px;';
-  wrap.appendChild(table);
-  researchResultsEl.appendChild(wrap);
-
-  updateRecipientSummary();
+}
+// Posted date: "Sep 15" (+ year if not this year), age underneath, full time on hover.
+function fmtPosted(iso) {
+  if (!iso) return '<span class="posted-none">–</span>';
+  const d = new Date(iso);
+  if (isNaN(d)) return '<span class="posted-none">–</span>';
+  const now = new Date();
+  const opts = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+  const days = Math.floor((now - d) / 86400000);
+  const age = days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`;
+  return `<span class="posted-date" title="${esc(d.toLocaleString())}">${esc(d.toLocaleDateString(undefined, opts))}</span><span class="posted-age">${age}</span>`;
 }
 
-// The table is rebuilt on every poll while a scrape streams in, so tick state
-// and already-drafted rows have to live outside it — otherwise a redraw two
-// seconds later would silently undo the user's selection.
-const untickedEmails = new Set();
-const draftedEmails = new Set();
-
-/** A row's addresses minus any that already became a draft. */
-function remainingEmails(item) {
-  return (item?.contacts?.emails ?? []).filter((e) => !draftedEmails.has(e.toLowerCase()));
+// Freshness badge plus the age of the last check; the hover gives relay age.
+function fmtAge(iso) {
+  const mins = Math.floor((Date.now() - new Date(iso)) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
+  const days = Math.floor(mins / 1440);
+  return days === 1 ? '1 day ago' : `${days} days ago`;
+}
+function fmtChecked(r) {
+  if (!r.refreshStatus) return '<span class="posted-none">Not checked</span>';
+  const labels = { fresh: 'Fresh', unverified: 'Unverified', expired: 'Expired' };
+  const hover = r.relayCheckedAt
+    ? `Relay last confirmed ${new Date(r.relayCheckedAt).toLocaleString()}`
+    : 'Relay never confirmed from a live page';
+  const age = r.checkedAt ? `<span class="posted-age">${fmtAge(r.checkedAt)}</span>` : '';
+  return `<span class="fresh-badge ${esc(r.refreshStatus)}" title="${esc(hover)}">${esc(labels[r.refreshStatus] || r.refreshStatus)}</span>${age}`;
 }
 
-/**
- * True once every address on the row has been written to.
- *
- * Per address rather than per row: when one of a row's two addresses drafted
- * and the other failed, treating the row as undrafted put the successful one
- * back on screen, ticked, ready to be drafted a second time.
- */
-function isFullyDrafted(item) {
-  const all = item?.contacts?.emails ?? [];
-  return all.length > 0 && remainingEmails(item).length === 0;
+// "473b978176cb370cafac3287d23f8c53@res.craigslist.org" -> "473b97…8c53@res.craigslist.org"
+function shortRelay(addr) {
+  const [local, domain] = String(addr).split('@');
+  if (!domain || local.length <= 12) return addr;
+  return `${local.slice(0, 6)}…${local.slice(-4)}@${domain}`;
+}
+function fmtPhone(p) {
+  const d = String(p).replace(/\D/g, '');
+  return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : esc(p);
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+function upsertRow(row) {
+  const i = rows.findIndex((r) => r.url === row.url);
+  if (i >= 0) rows[i] = { ...rows[i], ...row };
+  else rows.push(row);
 }
 
-/** Progress line for a run that is still going, or its final tally. */
-function renderProgress(p) {
-  if (!p) return null;
-  const el = document.createElement('div');
-  el.style.cssText =
-    'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);' +
-    'border-radius:8px;font-size:0.8rem;background:var(--bg);';
-  const secs = Math.round((p.elapsedMs ?? 0) / 1000);
-  const time = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
+function setSentFilter(value) {
+  filter = value;
+  document.querySelectorAll('.filter').forEach((x) => x.classList.toggle('active', x.dataset.filter === value));
+}
+setSentFilter(prefs.sentFilter || 'all');
+document.querySelectorAll('.filter').forEach((b) =>
+  b.addEventListener('click', () => {
+    setSentFilter(b.dataset.filter);
+    savePrefs({ sentFilter: b.dataset.filter });
+    renderRows();
+  })
+);
 
-  // There is no total to count towards any more — the run cycles until it is
-  // stopped, so elapsed time and throughput are the only honest figures.
-  if (p.status === 'running') {
-    el.innerHTML =
-      `<strong>Running…</strong> ${p.completed} contact row${p.completed === 1 ? '' : 's'} · ${time}` +
-      (p.label ? ` · <span style="color:var(--muted)">${escapeHtml(p.label)}</span>` : '');
-  } else {
-    el.style.color = 'var(--muted)';
-    el.innerHTML =
-      `<strong>${p.status === 'failed' ? 'Failed' : 'Stopped'}</strong> — ` +
-      `${p.completed} contact row${p.completed === 1 ? '' : 's'} in ${time}. Everything found is saved.`;
+async function loadContacts() {
+  rows = await (await fetch('/api/contacts')).json();
+  renderRows();
+}
+loadContacts();
+
+document.getElementById('reloadData').addEventListener('click', async () => {
+  rows = await (await fetch('/api/contacts/reload', { method: 'POST' })).json();
+  renderRows();
+});
+
+document.getElementById('refreshProxies').addEventListener('click', async (e) => {
+  const btn = e.target;
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = 'Fetching…';
+  try {
+    const r = await (await fetch('/api/proxies/refresh', { method: 'POST' })).json();
+    if (r.ok) alert(`Fresh pool built: found ${r.found}, added ${r.added}.\nStored ${r.stats.stored}. Liveness verification runs during scraping.`);
+    else alert('Refresh failed: ' + r.error);
+  } catch (err) {
+    alert('Refresh failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
   }
-  return el;
+});
+
+document.getElementById('dedupe').addEventListener('click', async () => {
+  const r = await (await fetch('/api/contacts/dedupe', { method: 'POST' })).json();
+  alert(`Removed ${r.removed} duplicate-phone contacts. ${r.count.total} remain.`);
+  rows = await (await fetch('/api/contacts')).json();
+  renderRows();
+});
+
+// ---------- Scraper (server-side run; this page only attaches to its events) ----------
+let es = null;
+const log = document.getElementById('scrapeLog');
+const resultsplit = document.getElementById('resultsplit');
+const logToggleBtn = document.getElementById('logToggle');
+function applyTraceHidden(hidden) {
+  resultsplit.classList.toggle('trace-hidden', hidden);
+  logToggleBtn.textContent = hidden ? 'Show trace' : 'Hide trace';
+  logToggleBtn.setAttribute('aria-pressed', String(!hidden));
+}
+applyTraceHidden(!!prefs.traceHidden);
+logToggleBtn.addEventListener('click', () => {
+  const hidden = !resultsplit.classList.contains('trace-hidden');
+  applyTraceHidden(hidden);
+  savePrefs({ traceHidden: hidden });
+});
+// Bounded, batched log: keeps the last LOG_MAX lines and repaints at most once
+// per frame. Appending to one ever-growing textContent froze the tab on long runs.
+const LOG_MAX = 400;
+const logLines = [];
+let logDirty = false;
+function paintLog() {
+  logDirty = false;
+  // Only auto-scroll if the reader is already at the bottom (don't yank them
+  // away while they're reading older lines).
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.textContent = logLines.length ? logLines.join('\n') : 'Waiting for a run…';
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+function addLog(line) {
+  logLines.push(line);
+  if (logLines.length > LOG_MAX) logLines.splice(0, logLines.length - LOG_MAX);
+  if (logDirty) return;
+  logDirty = true;
+  requestAnimationFrame(paintLog);
+}
+document.getElementById('logClear').addEventListener('click', () => {
+  logLines.length = 0;
+  paintLog();
+});
+
+function handleEvent(e) {
+  if (e.type === 'post') {
+    upsertRow(e.row);
+    renderRows();
+  } else if (e.type === 'done') {
+    addLog(`Done. stored ${e.stored}, relays ${e.relays ?? 0}, dropped ${e.dropped}, parked ${e.parked ?? 0}, ${e.attempts} attempts.`);
+    loadContacts();
+  } else if (e.type === 'error') {
+    addLog(`ERROR: ${e.message}`);
+  } else if (e.type === 'aborted') {
+    addLog(`⛔ ABORTED: ${e.message}`);
+  } else if (e.type === 'blocked') {
+    addLog(`⚠ BLOCKED by Craigslist on ${e.area}/${e.category}.`);
+  } else if (e.type === 'cooldown') {
+    addLog(`⏸ IP blocked — cooling down ${Math.round(e.cooldownMs / 1000)}s before retrying.`);
+  } else if (e.type === 'collect-error') {
+    addLog(`⚠ fetch failed ${e.area}/${e.category}: ${e.error}${e.willRetry ? ' — retrying at end of cycle' : ' — gave up this cycle'}`);
+  } else if (e.type === 'proxies-fetched') {
+    addLog(`proxies fetched: ${e.count} (stored ${e.stats.stored})`);
+  } else if (e.type === 'parked') {
+    addLog(`parked (tried ${e.tried} proxies): ${e.url}`);
+  } else if (e.type === 'cycle-done') {
+    addLog(`cycle ${e.cycle} done · ${e.newPosts} new posts · ${e.seen} seen`);
+    loadContacts();
+  } else if (e.type === 'retry') {
+    addLog(`retry #${e.attempt} (${e.reason}): ${e.url}`);
+  } else if (e.type === 'dropped') {
+    addLog(`dropped (${e.reason || ''}): ${e.url}`);
+  } else if (e.type === 'contacts-updated') {
+    loadContacts();
+  } else if (e.type === 'warn') {
+    addLog(`WARN: ${e.message}`);
+  } else if (e.type === 'refresh-started') {
+    addLog(`Refresh started: ${e.workers} workers, up to ${e.maxProxiesPerPost} proxies per post.`);
+  } else if (e.type === 'refresh-stopped') {
+    addLog(`Refresh stopped. ${e.confirmed} same, ${e.changed} changed, ${e.unverified} unverified, ${e.expired} expired, ${e.attempts} attempts.`);
+    loadContacts();
+  } else if (e.type === 'refresh-sweep') {
+    if (e.phase === 'start') addLog(`Refresh sweep: checking ${e.total} listings for expiry.`);
+    else addLog(`Refresh sweep ${e.phase}: ${e.done}/${e.total} checked, ${e.expired} expired.`);
+  } else if (e.type === 'refresh-result') {
+    const words = {
+      confirmed: `relay same (${e.tried} proxies)`,
+      changed: `RELAY CHANGED ${e.from} to ${e.to} (${e.tried} proxies)`,
+      unverified: `unverified after ${e.tried} proxies`,
+      expired: 'expired',
+    };
+    addLog(`refresh: ${words[e.outcome]}: ${e.url}`);
+  } else if (e.type !== 'collected') {
+    addLog(JSON.stringify(e));
+  }
 }
 
-/** Every address ticked in the table — this is the recipient list. */
-function selectedRecipients() {
-  const out = [];
-  for (const cb of researchResultsEl.querySelectorAll('input[type="checkbox"]:checked')) {
-    for (const e of (cb.dataset.emails || '').split(',').filter(Boolean)) {
-      if (!out.some((x) => x.toLowerCase() === e.toLowerCase())) out.push(e);
+// Attach to the server's event stream. If the connection drops (sleep, VPN
+// toggle, refresh) the browser auto-reconnects; the run is unaffected.
+function attachEvents() {
+  if (es) return;
+  es = new EventSource('/api/scrape/events');
+  es.onmessage = (ev) => {
+    try {
+      handleEvent(JSON.parse(ev.data));
+    } catch {
+      /* ignore malformed */
     }
-  }
-  return out;
+  };
+  es.onerror = () => {
+    addLog('… stream interrupted — reconnecting (scraper keeps running on the server)');
+  };
 }
 
-function updateRecipientSummary() {
-  const el = document.getElementById('recipient-summary');
-  if (!el) return;
-  const n = selectedRecipients().length;
-  el.textContent = n
-    ? `${n} address${n === 1 ? '' : 'es'} selected from the table below.`
-    : 'Scrape below, then tick the rows you want. Selected addresses become the recipients.';
-  el.style.color = n ? 'var(--success, #1a8a4a)' : 'var(--muted)';
+function setRunButtons(running) {
+  document.getElementById('startScrape').disabled = running;
+  document.getElementById('stopScrape').disabled = !running;
 }
 
-// ── Modal open/close ─────────────────────────────────────────────
-function escapeHtml(value = '') {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+document.getElementById('startScrape').addEventListener('click', async () => {
+  const areaVals = areasMs.values();
+  if (!areaVals.length) return alert('Select at least one area.');
+  const params = new URLSearchParams({
+    areas: areaVals.join(','),
+    categories: catsMs.values().join(','),
+    query: document.getElementById('query').value,
+    concurrency: document.getElementById('concurrency').value,
+    maxProxiesPerPost: document.getElementById('maxProxiesPerPost').value,
+    replyWaitMs: String((Number(document.getElementById('replyWait').value) || 25) * 1000),
+    pageTimeoutMs: String(Math.max(0, Number(document.getElementById('pageTimeout').value) || 0) * 1000),
+    loop: document.getElementById('loop').checked ? '1' : '0',
+    cycleDelayMs: String((Number(document.getElementById('cycleDelay').value) || 45) * 1000),
+    useProxies: document.getElementById('useProxies').checked ? '1' : '0',
+    headless: document.getElementById('headless').checked ? '1' : '0',
+  });
+  logLines.length = 0;
+  const r = await fetch(`/api/scrape/start?${params}`, { method: 'POST' });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || !data.ok) return alert(data.error || 'Could not start the run.');
+  setRunButtons(true);
+  attachEvents();
+  setupEl.open = false; // fold setup into its one-line summary; results get the height
+});
 
-// Scraped hrefs are third-party data — escaping alone wouldn't stop a
-// `javascript:` URL, so only let http(s) through.
-function safeUrl(value) {
+document.getElementById('stopScrape').addEventListener('click', async () => {
+  await fetch('/api/scrape/stop', { method: 'POST' });
+  addLog('Stop requested…');
+});
+
+// Relay refresh: its own switch, independent of Start/Stop. It reuses the run
+// parameters above, but never the Workers field (it always runs 3 workers).
+document.getElementById('refreshToggle').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  e.target.disabled = true;
   try {
-    const u = new URL(String(value));
-    return u.protocol === 'http:' || u.protocol === 'https:' ? escapeHtml(u.href) : '#';
-  } catch {
-    return '#';
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+    if (on) {
+      opts.body = JSON.stringify({
+        headless: document.getElementById('headless').checked,
+        maxProxiesPerPost: document.getElementById('maxProxiesPerPost').value,
+        replyWaitMs: (Number(document.getElementById('replyWait').value) || 25) * 1000,
+        pageTimeoutMs: Math.max(0, Number(document.getElementById('pageTimeout').value) || 0) * 1000,
+      });
+    }
+    const r = await fetch(`/api/refresh/${on ? 'start' : 'stop'}`, opts);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) alert(data.error || 'Could not change the refresh switch.');
+    attachEvents();
+  } finally {
+    e.target.disabled = false;
+    pollStatus();
   }
-}
+});
 
-/**
- * Seeds the drafted set from disk.
- *
- * Without this the filter was browser memory only, so reloading the page put
- * every already-drafted row back in the table, ticked and ready to be sent a
- * second time.
- */
-async function loadContactStore() {
+// On page load: if a run is already going on the server, re-attach to it.
+(async () => {
   try {
-    const res = await fetch('/api/research/contacts');
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const e of data.drafted ?? []) draftedEmails.add(String(e).toLowerCase());
-    lastContactCounts = { pending: data.pending, drafted: data.drafted?.length ?? 0, phones: data.phones };
-    renderLiveStatus(null);
+    const s = await (await fetch('/api/status')).json();
+    setRunButtons(!!s.running);
+    if (s.running) attachEvents();
   } catch {
-    // A missing store is not an error — it just means nothing scraped yet.
+    /* server not reachable yet */
   }
-}
+})();
 
-loadAccounts();
-// Drawn empty at load so the column reads as "nothing running yet" rather
-// than as a panel that failed to appear.
-renderLiveStatus(null);
-loadContactStore();
-renderAreaList();
-loadCategories();
+// ---------- DB format ----------
+async function loadFormat() {
+  const data = await (await fetch('/api/db-format')).json();
+  document.getElementById('dbFormat').textContent = JSON.stringify(data, null, 2);
+}
+document.getElementById('reloadFormat').addEventListener('click', loadFormat);

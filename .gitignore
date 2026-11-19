@@ -1,19 +1,11 @@
 node_modules/
 .env
-.env.*
-!.env.example
-*.env
-data/
-.playwright-mcp/
+.DS_Store
 
-# WireGuard/OpenVPN configs carry a PrivateKey that grants access to the
-# account. Both spellings — macOS is case-insensitive, so the directory can be
-# committed under either.
-proxies/
-Proxies/
-*.conf
-*.ovpn
-# Generated from those configs by scripts/build-vpn-proxies.js, and vpn/.env
-# holds the key. Belt and braces: ignore the whole directory, not just the
-# env file, since everything in it is regenerable.
-vpn/
+# Runtime data: scraped contacts (personal data), OAuth tokens, proxy pools,
+# and their backups/archives. The app recreates data/ files on demand.
+data/
+
+# Logs / throwaway test scripts
+*.log
+_*.js
