@@ -553,7 +553,12 @@ function renderRows() {
       <td>${post}</td>
       <td>${relay}</td>
       <td>${fmtChecked(r)}</td>
-      <td>${(r.phones || []).map(fmtPhone).join('<br>')}</td>
+      <td>${(r.phones || [])
+        .map(
+          (p) =>
+            `<span class="phone-line">${fmtPhone(p)}<button type="button" class="phone-copy" data-id="${r.id}" data-phone="${esc(p)}" title="Copy and mark sent" aria-label="Copy ${esc(p)} and mark sent">${COPY_ICON}</button></span>`
+        )
+        .join('')}</td>
       <td>${others.map(esc).join('<br>')}</td>
       <td><span class="note-clamp">${r.captchaBlocked ? 'captcha ' : ''}${esc(r.note || '')}</span></td>
       <td><button class="del-row" data-id="${r.id}" title="Delete record" aria-label="Delete record">✕</button></td></tr>`;
@@ -575,6 +580,7 @@ function renderRows() {
       }
     })
   );
+  tbody.querySelectorAll('.phone-copy').forEach((btn) => btn.addEventListener('click', () => copyPhone(btn)));
   tbody.querySelectorAll('.del-row').forEach((btn) =>
     btn.addEventListener('click', async () => {
       const res = await fetch(`/api/contacts/${btn.dataset.id}`, { method: 'DELETE' });
@@ -651,6 +657,102 @@ function fmtPhone(p) {
 }
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+// --- Phone copy: copies the number, shows a toast, marks the row sent ---
+const COPY_ICON =
+  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+// Same "(555) 123-4567" form the table shows.
+function phoneText(p) {
+  const d = String(p).replace(/\D/g, '');
+  return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p);
+}
+
+// Clipboard API needs a secure context (localhost is one; a LAN IP over http
+// is not), so fall back to a hidden textarea + execCommand.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+const toastsEl = document.getElementById('toasts');
+const TOAST_MS = 4000;
+const TOAST_MAX = 3;
+function showToast({ kicker, title, body, tone = 'ok' }) {
+  const el = document.createElement('div');
+  el.className = `toast ${tone}`;
+  el.setAttribute('role', tone === 'bad' ? 'alert' : 'status');
+  const k = document.createElement('div');
+  k.className = 'toast-kicker';
+  k.textContent = kicker;
+  const t = document.createElement('div');
+  t.className = 'toast-title';
+  t.textContent = title;
+  const b = document.createElement('div');
+  b.className = 'toast-body';
+  b.textContent = body;
+  el.append(k, t, b);
+  const dismiss = () => {
+    clearTimeout(timer);
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 180);
+  };
+  const timer = setTimeout(dismiss, TOAST_MS);
+  el.addEventListener('click', dismiss);
+  toastsEl.appendChild(el);
+  while (toastsEl.children.length > TOAST_MAX) toastsEl.firstElementChild.remove();
+}
+
+async function copyPhone(btn) {
+  const row = rows.find((r) => r.id === btn.dataset.id);
+  const text = phoneText(btn.dataset.phone);
+  const adTitle = (row && row.title) || '(untitled)';
+  if (!(await copyText(text))) {
+    showToast({ kicker: 'Copy failed · not marked sent', title: text, body: 'The browser blocked clipboard access. Copy the number by hand.', tone: 'bad' });
+    return;
+  }
+  if (!row || row.sent) {
+    showToast({ kicker: 'Copied', title: text, body: adTitle });
+    return;
+  }
+  let marked = false;
+  try {
+    const res = await fetch(`/api/contacts/${row.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sent: true }),
+    });
+    marked = res.ok;
+  } catch {
+    /* reported below */
+  }
+  if (marked) {
+    row.sent = true;
+    renderRows();
+    showToast({ kicker: 'Copied · marked sent', title: text, body: adTitle });
+  } else {
+    showToast({ kicker: "Copied · couldn't mark sent", title: text, body: adTitle, tone: 'bad' });
+  }
 }
 function upsertRow(row) {
   const i = rows.findIndex((r) => r.url === row.url);
