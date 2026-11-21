@@ -4,7 +4,7 @@ node_modules/
 
 # Runtime data: scraped contacts (personal data), OAuth tokens, proxy pools,
 # and their backups/archives. The app recreates data/ files on demand.
-data/
+/data/
 
 # Logs / throwaway test scripts
 *.log
