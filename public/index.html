@@ -125,6 +125,7 @@
               <span>Refresh unsent relays</span>
             </label>
             <span class="refresh-state" id="r-state">off</span>
+            <span class="refresh-item" id="r-scope" title="Refresh checks only the unsent posts the list below shows (its filters apply)."></span>
             <span class="refresh-item"><b id="r-fresh">0</b> fresh</span>
             <span class="refresh-item"><b id="r-unverified">0</b> unverified</span>
             <span class="refresh-item"><b id="r-expired">0</b> expired</span>
@@ -232,6 +233,23 @@
 
     <div id="toasts" class="toasts" aria-live="polite"></div>
     <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
-    <script src="/app.js"></script>
+    <script>
+      // Load the shared settings (stored on the server, same for every device)
+      // before the app starts, so it opens with them already in place.
+      (function () {
+        var start = function (s) {
+          window.__SHARED_SETTINGS__ = s || null;
+          var el = document.createElement('script');
+          el.src = '/app.js';
+          document.body.appendChild(el);
+        };
+        var ctl = window.AbortController ? new AbortController() : null;
+        var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 4000);
+        fetch('/api/settings', { cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; })
+          .then(function (s) { clearTimeout(timer); start(s); });
+      })();
+    </script>
   </body>
 </html>

@@ -168,36 +168,120 @@ function makeMultiselect(el, items, { valueKey, labelFn, allowAdd, onChange = ()
   };
 }
 
-// ---------- Saved UI state (localStorage) ----------
-// Area/category selections, run parameters, filters and panel states survive
-// reloads. If a run is active, the server's actual areas/categories win.
+// ---------- Shared UI state (stored on the server) ----------
+// Area/category selections, run parameters, filters and panel states are saved
+// on the server (data/settings.json), so every device that opens the page gets
+// the same settings, and a change on one device shows up on the others within
+// a few seconds. localStorage is only an offline fallback. If a run is active,
+// the server's actual areas/categories win on page load.
 const STORE_KEY = 'autoemail.scraper.v1';
-let prefs = (() => {
+const CLIENT_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+const shared = window.__SHARED_SETTINGS__;
+let settingsVersion = shared ? shared.version || 0 : 0;
+const localPrefs = (() => {
   try {
     return JSON.parse(localStorage.getItem(STORE_KEY)) || {};
   } catch {
     return {};
   }
 })();
+const serverHasPrefs = !!(shared && shared.prefs && Object.keys(shared.prefs).length);
+let prefs = serverHasPrefs ? { ...shared.prefs } : { ...localPrefs };
+let pendingPatch = {};
 let prefsTimer = null;
-function writePrefs() {
-  clearTimeout(prefsTimer);
-  prefsTimer = null;
+
+function cacheLocally() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(prefs));
   } catch {
-    /* storage unavailable — selections just won't persist */
+    /* storage unavailable — the server copy is the real one anyway */
   }
+}
+function writePrefs({ keepalive = false } = {}) {
+  clearTimeout(prefsTimer);
+  prefsTimer = null;
+  cacheLocally();
+  const patch = pendingPatch;
+  if (!Object.keys(patch).length) return;
+  pendingPatch = {};
+  fetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ patch, clientId: CLIENT_ID }),
+    keepalive,
+  })
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+    .then((s) => {
+      settingsVersion = Math.max(settingsVersion, s.version || 0);
+    })
+    .catch(() => {
+      // Server unreachable: keep the change and send it with the next save.
+      pendingPatch = { ...patch, ...pendingPatch };
+      if (!prefsTimer) prefsTimer = setTimeout(writePrefs, 5000);
+    });
 }
 function savePrefs(patch) {
   prefs = { ...prefs, ...patch };
+  pendingPatch = { ...pendingPatch, ...patch };
   clearTimeout(prefsTimer);
-  prefsTimer = setTimeout(writePrefs, 150);
+  prefsTimer = setTimeout(writePrefs, 300);
 }
 // Don't lose a pending save if the page is reloaded/closed right after a change.
 window.addEventListener('pagehide', () => {
-  if (prefsTimer) writePrefs();
+  if (prefsTimer) writePrefs({ keepalive: true });
 });
+// First device after this update: move its browser-saved settings to the server.
+if (shared && !serverHasPrefs && Object.keys(localPrefs).length) savePrefs(localPrefs);
+
+// Pick up changes saved by other devices.
+async function pollSettings() {
+  if (document.hidden) return;
+  try {
+    const s = await (await fetch('/api/settings', { cache: 'no-store' })).json();
+    if (!s || (s.version || 0) <= settingsVersion) return;
+    settingsVersion = s.version || 0;
+    if (s.updatedBy === CLIENT_ID) return; // our own save coming back
+    // Unsent local edits win over the incoming copy.
+    prefs = { ...(s.prefs || {}), ...pendingPatch };
+    cacheLocally();
+    applySharedPrefs();
+  } catch {
+    /* offline — try again next tick */
+  }
+}
+setInterval(pollSettings, 3000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) pollSettings();
+});
+
+// Put the current `prefs` into every control (used when another device changes
+// them). A field the user is typing in right now is left alone.
+function applySharedPrefs() {
+  const p = prefs.params || {};
+  const active = document.activeElement;
+  for (const id of PARAM_VALUES) {
+    const el = document.getElementById(id);
+    if (p[id] !== undefined && el !== active) el.value = p[id];
+  }
+  for (const id of PARAM_CHECKS) if (p[id] !== undefined) document.getElementById(id).checked = !!p[id];
+  if (areasMs && Array.isArray(prefs.areas)) areasMs.setValues(prefs.areas);
+  if (catsMs && Array.isArray(prefs.categories)) catsMs.setValues(prefs.categories);
+  if (setupEl.open !== (prefs.setupOpen !== false)) setupEl.open = prefs.setupOpen !== false;
+  applyTracerMode(!!prefs.tracerFull);
+  applyTraceHidden(!!prefs.traceHidden);
+  setSentFilter(prefs.sentFilter || 'all');
+  const f = prefs.filters || {};
+  stateFilter = f.state || '';
+  cityFilter = f.city || '';
+  if (cityFilterEl !== active) cityFilterEl.value = cityFilter;
+  phoneOnly = !!f.phoneOnly;
+  phoneOnlyEl.checked = phoneOnly;
+  catFilter = f.category || '';
+  freshFilter = f.freshness || '';
+  freshFilterEl.value = freshFilter;
+  updateRunSentence();
+  renderRows();
+}
 
 const PARAM_VALUES = ['query', 'concurrency', 'maxProxiesPerPost', 'replyWait', 'pageTimeout', 'cycleDelay'];
 const PARAM_CHECKS = ['loop', 'useProxies', 'headless'];
@@ -300,7 +384,10 @@ function updateRunSentence() {
 // Setup panel: remember open/closed; folds itself when a run starts.
 const setupEl = document.getElementById('setup');
 if (prefs.setupOpen === false) setupEl.open = false;
-setupEl.addEventListener('toggle', () => savePrefs({ setupOpen: setupEl.open }));
+setupEl.addEventListener('toggle', () => {
+  if (setupEl.open === (prefs.setupOpen !== false)) return; // already saved (e.g. applied from another device)
+  savePrefs({ setupOpen: setupEl.open });
+});
 
 // Telemetry strip: compact (one row) or all stats.
 const tracerEl = document.getElementById('tracer');
@@ -378,6 +465,11 @@ function renderRefresh(r) {
   stateEl.textContent = r.stopping ? 'stopping…' : on ? `${r.activeWorkers}/${r.workers} workers` : r.error ? `stopped: ${r.error}` : 'off';
   stateEl.classList.toggle('on', on);
   stateEl.classList.toggle('bad', !on && !!r.error);
+  if (r.scope) {
+    document.getElementById('r-scope').innerHTML = r.scope.filtered
+      ? `<b>${r.scope.count}</b> in filtered list`
+      : `<b>${r.scope.count}</b> in list (no filter)`;
+  }
   document.getElementById('r-fresh').textContent = r.counts.fresh;
   document.getElementById('r-unverified').textContent = r.counts.unverified;
   document.getElementById('r-expired').textContent = r.counts.expired;

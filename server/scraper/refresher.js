@@ -5,6 +5,10 @@
 // whether or not a scrape is active. Proxies follow the main engine's rules
 // (sticky while working, relax when blocked, dropped after 10 linear failures).
 //
+// Scope: only the contacts the results list shows right now. The list filters
+// (Has phone, category, state, city, freshness, sent/unsent) are part of the
+// shared settings, so refresh follows them live, from any device.
+//
 // Order of work: never-checked posts first, newest posted first; after that,
 // whichever post was checked longest ago. A separate HTTP sweep marks dead
 // listings Expired so the browser workers never spend proxies on them.
@@ -18,6 +22,8 @@ const { fetchFreeProxies } = require('./proxySource');
 const { makeBroker } = require('./broker');
 const { httpGet, UA } = require('./httpGet');
 const { workPost, NET_ERR } = require('./workPost');
+const settings = require('../settings');
+const { makeFilter, isUnfiltered } = require('../contactFilter');
 
 const WORKERS = 3;
 const MIN_RECHECK_MS = 60 * 60 * 1000; // never re-visit a post within an hour
@@ -25,6 +31,7 @@ const SWEEP_LANES = 2;
 const SWEEP_DELAY_MS = 300;
 const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000; // skip posts swept in the last day
 const SWEEP_BLOCK_PAUSE_MS = 10 * 60 * 1000;
+const SWEEP_RESCAN_MS = 30000; // how often the sweep looks for newly listed posts
 const PRIORITY_SEED_MS = 30000;
 const SAME_PROXY_VISITS = 3; // visits per post on a proxy that reaches the page cleanly
 
@@ -63,11 +70,25 @@ function comesBefore(a, b) {
   return Date.parse(a.checkedAt) < Date.parse(b.checkedAt);
 }
 
+// Only the contacts the results list shows right now (its filters are in the
+// shared settings): Has phone, category, state, city, freshness, sent/unsent.
+function scopeFilter() {
+  return makeFilter(settings.get().prefs, contacts.list());
+}
+
+// Unsent, not expired, and shown in the list — the posts refresh may work on.
+function inScopeRows() {
+  const shown = scopeFilter();
+  return contacts.list().filter((r) => !r.sent && r.url && r.refreshStatus !== 'expired' && shown(r));
+}
+
 function pickNext(busy) {
   const now = Date.now();
   let best = null;
+  const shown = scopeFilter();
   for (const r of contacts.list()) {
     if (r.sent || !r.url || r.refreshStatus === 'expired' || busy.has(r.url)) continue;
+    if (!shown(r)) continue;
     if (r.checkedAt && now - Date.parse(r.checkedAt) < MIN_RECHECK_MS) continue;
     if (!best || comesBefore(r, best)) best = r;
   }
@@ -293,19 +314,22 @@ async function refreshWorker(ctx) {
 }
 
 // --- HTTP sweep: finds dead listings without a browser, proxy or captcha --------
+// Covers only the posts shown in the list. Runs again whenever the list holds
+// posts it hasn't swept in the last day (e.g. after the filters change).
 async function sweep(ctx) {
+  while (!ctx.stopped) {
+    await sweepOnce(ctx);
+    await pause(ctx, SWEEP_RESCAN_MS);
+  }
+}
+
+async function sweepOnce(ctx) {
   const now = Date.now();
-  const todo = contacts
-    .list()
-    .filter(
-      (r) =>
-        !r.sent &&
-        r.url &&
-        r.refreshStatus !== 'expired' &&
-        !(r.aliveCheckedAt && now - Date.parse(r.aliveCheckedAt) < SWEEP_MAX_AGE_MS)
-    )
+  const todo = inScopeRows()
+    .filter((r) => !(r.aliveCheckedAt && now - Date.parse(r.aliveCheckedAt) < SWEEP_MAX_AGE_MS))
     .sort((a, b) => postedTime(a) - postedTime(b)) // oldest are the likeliest dead
     .map((r) => r.url);
+  if (!todo.length) return;
 
   const s = state.sweep;
   Object.assign(s, { running: true, total: todo.length, done: 0, expired: 0, failed: 0, pausedUntil: 0 });
@@ -319,6 +343,11 @@ async function sweep(ctx) {
         continue;
       }
       const url = todo[i++];
+      const row = contacts.findByUrl(url);
+      if (!row || row.sent || !scopeFilter()(row)) {
+        s.done++; // left the list (filter changed, sent or deleted) — skip it
+        continue;
+      }
       try {
         const { status } = await httpGet(url, { timeout: 30000 });
         if (status === 404 || status === 410) {
@@ -423,7 +452,9 @@ function snapshot() {
     else c.unchecked++;
   }
   const b = run ? run.broker.sizes() : { fresh: 0, relax: 0 };
-  return { ...state, sweep: { ...state.sweep }, counts: c, proxyFresh: b.fresh, proxyRelax: b.relax };
+  // scope: unsent, not-expired posts in the filtered list (what refresh works on).
+  const scope = { count: inScopeRows().length, filtered: !isUnfiltered(settings.get().prefs) };
+  return { ...state, sweep: { ...state.sweep }, counts: c, scope, proxyFresh: b.fresh, proxyRelax: b.relax };
 }
 
 module.exports = { start, stop, snapshot, WORKERS, comesBefore, pickNext };

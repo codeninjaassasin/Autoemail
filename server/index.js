@@ -13,6 +13,7 @@ const scraper = require('./scraper');
 const refresher = require('./scraper/refresher');
 const contacts = require('./contacts');
 const proxies = require('./proxies');
+const settings = require('./settings');
 const areas = require('./data/areas');
 const categories = require('./data/categories');
 
@@ -98,6 +99,15 @@ app.delete('/api/contacts/:id', (req, res) => {
   if (!ok) return res.status(404).json({ ok: false, error: 'not found' });
   res.json({ ok: true });
 });
+
+// --- Shared UI settings (same for every device that opens the page) ---
+app.get('/api/settings', (req, res) => res.json(settings.get()));
+const saveSettings = (req, res) => {
+  const b = req.body || {};
+  res.json(settings.patch(b.patch, b.clientId));
+};
+app.put('/api/settings', saveSettings);
+app.post('/api/settings', saveSettings);
 
 // --- Tracer / status ---
 app.get('/api/status', (req, res) => res.json({ ...scraper.snapshot(), refresh: refresher.snapshot() }));
