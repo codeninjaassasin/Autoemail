@@ -496,6 +496,27 @@ phoneOnlyEl.addEventListener('change', () => {
   renderRows();
 });
 
+// Phone lookup: matches any stored phone containing the typed digits, so
+// "(555) 123-4567", "555.123", "+1 555 123 4567" and "4567" all work. Stored
+// phones are bare 10-digit strings. Not saved to prefs — it's a one-off lookup.
+const phoneFilterEl = document.getElementById('phoneFilter');
+let phoneQuery = '';
+function phoneDigits(raw) {
+  const s = String(raw || '').trim();
+  let d = s.replace(/\D/g, '');
+  // Drop the country code: a full 11-digit 1XXXXXXXXXX, or an explicit "+1"/"1 " prefix.
+  if ((d.length === 11 && d[0] === '1') || /^\+1|^1[\s.\-(]/.test(s)) d = d.slice(1);
+  return d;
+}
+function matchesPhone(r) {
+  if (!phoneQuery) return true;
+  return (r.phones || []).some((p) => String(p).replace(/\D/g, '').includes(phoneQuery));
+}
+phoneFilterEl.addEventListener('input', () => {
+  phoneQuery = phoneDigits(phoneFilterEl.value);
+  renderRows();
+});
+
 function renderRows() {
   rebuildStateOptions();
   rebuildCategoryOptions();
@@ -506,7 +527,8 @@ function renderRows() {
       (!effCat || r.category === effCat) &&
       (!phoneOnly || (r.phones && r.phones.length > 0)) &&
       (!freshFilter || (r.refreshStatus || 'unchecked') === freshFilter) &&
-      matchesLocation(r)
+      matchesLocation(r) &&
+      matchesPhone(r)
   ).sort((a, b) => {
     // Newest posted first; rows without a posted date go last.
     const ta = a.postedAt ? Date.parse(a.postedAt) : -Infinity;
@@ -579,7 +601,9 @@ function renderRows() {
   if (empty) {
     empty.hidden = filtered.length > 0;
     empty.textContent = rows.length
-      ? 'No contacts match these filters. Clear the category, state, city, freshness or Has phone filter to see all.'
+      ? phoneQuery
+        ? 'No contacts match this phone number with the current filters. Set the other filters to All to search every record.'
+        : 'No contacts match these filters. Clear the category, state, city, freshness or Has phone filter to see all.'
       : 'No contacts yet. Pick areas and start a scrape — only posts with a contact land here.';
   }
 }
