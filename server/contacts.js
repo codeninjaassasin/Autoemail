@@ -37,6 +37,31 @@ function ensureDir() {
   fs.mkdirSync(path.dirname(FILE), { recursive: true });
 }
 
+// --- In-memory cache with change tracking --------------------------------------
+// Every change stamps the row with a rising `rev`, and a delete leaves a
+// tombstone, so a page can fetch only what changed since its last sync
+// (changesSince). `byUrl` / `byId` make lookups O(1). Disk writes are batched:
+// at most one write per SAVE_DEBOUNCE_MS, off the request path, plus a final
+// synchronous write when the process exits.
+const SAVE_DEBOUNCE_MS = 1500;
+const TOMBSTONE_MAX = 5000;
+let rev = 0; // highest rev handed out
+let byUrl = new Map();
+let byId = new Map();
+let tombstones = []; // [{ id, url, rev }]
+let saveTimer = null;
+let saving = null;
+let dirty = false;
+
+function reindex() {
+  byUrl = new Map();
+  byId = new Map();
+  for (const r of cache) {
+    if (r.url) byUrl.set(r.url, r);
+    if (r.id) byId.set(r.id, r);
+  }
+}
+
 function load(force = false) {
   if (cache && !force) return cache;
   try {
@@ -45,26 +70,115 @@ function load(force = false) {
   } catch {
     cache = [];
   }
+  // Fresh revs for this process: a page holding revs from before a restart
+  // sees `rev` go backwards and does a full resync.
+  rev = 0;
+  for (const r of cache) r.rev = ++rev;
+  tombstones = [];
+  epoch = Date.now().toString(36);
+  reindex();
   return cache;
 }
+let epoch = Date.now().toString(36); // changes on every (re)load: clients resync
 
-function save() {
+// Mark a row changed (call after mutating it in place).
+function touch(row) {
+  if (!row) return row;
+  row.rev = ++rev;
+  return row;
+}
+
+function writeNow() {
   ensureDir();
-  fs.writeFileSync(FILE, JSON.stringify(cache, null, 2));
+  const tmp = FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cache));
+  fs.renameSync(tmp, FILE);
+  dirty = false;
+}
+
+async function writeAsync() {
+  saveTimer = null;
+  if (!dirty) return;
+  dirty = false;
+  const body = JSON.stringify(cache); // compact: ~40% faster than pretty-printed
+  try {
+    await fs.promises.mkdir(path.dirname(FILE), { recursive: true });
+    const tmp = FILE + '.tmp';
+    await fs.promises.writeFile(tmp, body);
+    await fs.promises.rename(tmp, FILE);
+  } catch {
+    dirty = true;
+    scheduleSave();
+  }
+}
+
+function scheduleSave() {
+  dirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saving = writeAsync().finally(() => (saving = null));
+  }, SAVE_DEBOUNCE_MS);
+}
+const save = scheduleSave;
+
+// Flush pending changes before the process exits (kill / Ctrl-C).
+function flushSync() {
+  if (!cache || !dirty) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  try {
+    writeNow();
+  } catch {
+    /* nothing more we can do while exiting */
+  }
+}
+process.on('exit', flushSync);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    flushSync();
+    process.exit(0);
+  });
 }
 
 function list() {
   return load();
 }
 
+// Rows changed after `since` (a rev), plus ids deleted since then. When the
+// caller's epoch differs (server restarted / data reloaded) or its rev is too
+// old for the tombstones kept, it gets everything (`full: true`).
+function changesSince(since, clientEpoch) {
+  load();
+  const s = Number(since);
+  const oldestTomb = tombstones.length ? tombstones[0].rev : 0;
+  const full =
+    clientEpoch !== epoch || !Number.isFinite(s) || s <= 0 || s > rev || (tombstones.length >= TOMBSTONE_MAX && s < oldestTomb);
+  if (full) return { epoch, rev, full: true, rows: cache, deleted: [] };
+  return {
+    epoch,
+    rev,
+    full: false,
+    rows: cache.filter((r) => r.rev > s),
+    deleted: tombstones.filter((t) => t.rev > s).map((t) => t.id),
+  };
+}
+
+function bury(row) {
+  tombstones.push({ id: row.id, url: row.url, rev: ++rev });
+  if (tombstones.length > TOMBSTONE_MAX) tombstones.splice(0, tombstones.length - TOMBSTONE_MAX);
+}
+
 // A scraped row is keyed by its listing url; re-scraping updates in place and
-// preserves the manual `sent` flag. A NEW row sharing a phone with an existing
+// preserves the manual `sent` flag. A row marked sent is never updated. A NEW row sharing a phone with an existing
 // contact is treated as a duplicate and skipped (same advertiser reposting
 // across areas/categories).
 function upsert(row, source = 'scrape') {
   const rows = load();
-  const idx = rows.findIndex((r) => r.url === row.url);
+  const existing = byUrl.get(row.url);
+  const idx = existing ? rows.indexOf(existing) : -1;
   if (idx >= 0) {
+    // A contact marked sent is final: no relay update, no freshness stamp.
+    if (rows[idx].sent) return rows[idx];
     // Only non-empty incoming values overwrite: a re-scrape that came back
     // gated (relay null) or without a date must not wipe what was caught before.
     const patch = {};
@@ -82,19 +196,67 @@ function upsert(row, source = 'scrape') {
     );
     if (newRelay) stampRelay(merged, prev.relay, newRelay, source);
     rows[idx] = merged;
+    byUrl.set(merged.url, merged);
+    byId.set(merged.id, merged);
+    touch(merged);
     save();
     return merged;
   }
   if (row.phones && row.phones.length) {
-    const existing = new Set();
-    for (const r of rows) for (const ph of r.phones || []) existing.add(ph);
-    if (row.phones.some((ph) => existing.has(ph))) return null; // duplicate phone
+    const taken = new Set();
+    for (const r of rows) for (const ph of r.phones || []) taken.add(ph);
+    if (row.phones.some((ph) => taken.has(ph))) return null; // duplicate phone
   }
   const added = { id: crypto.randomUUID(), sent: false, scrapedAt: new Date().toISOString(), ...row };
   if (isRelay(row.relay)) stampRelay(added, null, row.relay, source);
   rows.push(added);
+  byUrl.set(added.url, added);
+  byId.set(added.id, added);
+  touch(added);
   save();
   return added;
+}
+
+// Manual entry from the list's pencil icon: a relay email and/or one phone.
+// Creates the contact when the post hasn't been scraped yet (`post` gives its
+// title/area/category). Returns { row } or { error }.
+function setManual(url, { relay, phone }, post = {}) {
+  const rows = load();
+  let row = byUrl.get(url) || null;
+  if (row && row.sent) return { error: 'This contact is marked sent.' };
+  if (phone && rows.some((r) => r !== row && (r.phones || []).includes(phone))) {
+    return { error: 'That phone number is already on another contact.' };
+  }
+  const now = new Date().toISOString();
+  if (!row) {
+    row = {
+      id: crypto.randomUUID(),
+      sent: false,
+      scrapedAt: now,
+      url,
+      title: post.title || '',
+      emails: [],
+      phones: [],
+      relay: null,
+      captchaBlocked: false,
+      note: '',
+      area: post.area || '',
+      category: post.category || '',
+      manual: true,
+    };
+    rows.push(row);
+    byUrl.set(row.url, row);
+    byId.set(row.id, row);
+  }
+  if (relay) {
+    row.relay = relay;
+    row.emails = [...new Set([...(row.emails || []), relay])];
+  }
+  if (phone) row.phones = [...new Set([...(row.phones || []), phone])];
+  row.manualAt = now;
+  touch(row);
+  save();
+  return { row };
 }
 
 // Remove rows that share a phone with an earlier row (keeps the first). Returns
@@ -114,14 +276,18 @@ function dedupeByPhone() {
     kept.push(r);
   }
   if (removed) {
+    const keptSet = new Set(kept);
+    for (const r of rows) if (!keptSet.has(r)) bury(r);
     cache = kept;
+    reindex();
     save();
   }
   return removed;
 }
 
 function findByUrl(url) {
-  return load().find((r) => r.url === url) || null;
+  load();
+  return byUrl.get(url) || null;
 }
 
 // Records the outcome of a refresh check: 'fresh' | 'unverified' | 'expired'.
@@ -129,33 +295,40 @@ function findByUrl(url) {
 // confirmed time, so an unverified row still shows how old its relay is.
 function setCheckStatus(url, status, { save: saveNow = true } = {}) {
   const row = findByUrl(url);
-  if (!row) return null;
+  if (!row || row.sent) return null; // sent contacts get no freshness checks
   row.checkedAt = new Date().toISOString();
   row.refreshStatus = status;
+  touch(row);
   if (saveNow) save();
+  else dirty = true;
   return row;
 }
 
 // The listing answered the HTTP sweep. Saved in batches by the caller.
 function markAlive(url) {
   const row = findByUrl(url);
-  if (row) row.aliveCheckedAt = new Date().toISOString();
+  if (row && !row.sent) row.aliveCheckedAt = new Date().toISOString();
 }
 
 function setSent(id, sent) {
-  const rows = load();
-  const row = rows.find((r) => r.id === id);
+  load();
+  const row = byId.get(id);
   if (!row) return null;
   row.sent = !!sent;
+  touch(row);
   save();
   return row;
 }
 
 function remove(id) {
   const rows = load();
-  const idx = rows.findIndex((r) => r.id === id);
+  const row = byId.get(id);
+  const idx = row ? rows.indexOf(row) : -1;
   if (idx < 0) return false;
   rows.splice(idx, 1);
+  byId.delete(row.id);
+  if (byUrl.get(row.url) === row) byUrl.delete(row.url);
+  bury(row);
   save();
   return true;
 }
@@ -167,7 +340,9 @@ function keepOnlyCategories(keep) {
   const kept = rows.filter((r) => allowed.has(r.category));
   const removed = rows.length - kept.length;
   if (removed) {
+    for (const r of rows) if (!allowed.has(r.category)) bury(r);
     cache = kept;
+    reindex();
     save();
   }
   return removed;
@@ -177,6 +352,12 @@ function keepOnlyCategories(keep) {
 function persist() {
   load();
   save();
+}
+
+// Current change counter + epoch (cheap: lets callers memoize derived data).
+function version() {
+  load();
+  return `${epoch}:${rev}`;
 }
 
 function reload() {
@@ -202,4 +383,9 @@ module.exports = {
   findByUrl,
   setCheckStatus,
   markAlive,
+  setManual,
+  touch,
+  changesSince,
+  version,
+  flushSync,
 };

@@ -4,17 +4,22 @@ const { chromium } = require('playwright');
 const config = require('../config');
 const contacts = require('../contacts');
 const proxies = require('../proxies');
+const posts = require('../posts');
 const solver = require('./solver');
 const { fetchFreeProxies } = require('./proxySource');
 const { collectPosts, PER_AREA_CAP } = require('./collectPosts');
 const { workPost, NET_ERR } = require('./workPost');
 const { makeBroker } = require('./broker');
+const { refreshPool } = require('./proxyRefresh');
 
 let currentRunToken = 0;
 let stopRequested = false;
 let activeBrowser = null; // the current run's browser, so Stop can abort in-flight pages
 let activeCtx = null; // the current run's context, so new proxies reach its broker
 const PRIORITY_SEED_MS = 30000; // how often verified proxies are pushed to the front
+const AUTO_REFRESH_MS = 60 * 60 * 1000; // rebuild the proxy pool every hour of a run...
+const AUTO_REFRESH_MIN_VERIFIED = 100; // ...or sooner when fewer verified proxies are usable
+const AUTO_REFRESH_MIN_GAP_MS = 15 * 60 * 1000; // but never more often than this
 
 const state = {
   running: false,
@@ -32,6 +37,10 @@ const state = {
   proxyRelax: 0,
   queueTotal: 0,
   queueRemaining: 0,
+  queueNew: 0, // posts not stored yet, waiting (served first)
+  newPostsFound: 0, // posts not stored yet, queued this run
+  autoRefreshes: 0, // automatic proxy pool refreshes this run
+  lastAutoRefreshAt: null,
   areas: [],
   categories: [],
   useProxies: false,
@@ -92,8 +101,26 @@ async function preflightBrowser(headless = config.headless) {
 // workers prove them by use).
 async function proxyProducer(ctx, myToken) {
   let lastSeed = 0;
+  let lastAuto = Date.now(); // the run starts with whatever pool exists
   while (myToken === currentRunToken && !stopRequested) {
     try {
+      // Automatic pool refresh: keep verified proxies, drop unverified ones,
+      // gather a new list, and re-queue it in full. Hourly, or sooner when the
+      // verified proxies run low.
+      const sinceAuto = Date.now() - lastAuto;
+      const verified = proxies.usable().length;
+      if (sinceAuto >= AUTO_REFRESH_MS || (verified < AUTO_REFRESH_MIN_VERIFIED && sinceAuto >= AUTO_REFRESH_MIN_GAP_MS)) {
+        lastAuto = Date.now();
+        const reason = sinceAuto >= AUTO_REFRESH_MS ? 'hourly' : `only ${verified} verified proxies left`;
+        const r = await refreshPool('keep-verified');
+        ctx.broker.reset();
+        ctx.broker.addPriority(proxies.usable().map((p) => p.server));
+        ctx.broker.addFresh(r.found.map((p) => p.server));
+        lastSeed = Date.now();
+        state.autoRefreshes++;
+        state.lastAutoRefreshAt = lastAuto;
+        emit({ type: 'proxies-auto-refresh', reason, kept: r.pruned.kept, removed: r.pruned.removed, found: r.found.length, stats: r.stats });
+      }
       // Verified proxies (proven by earlier use) go to the front of the queue.
       // The broker skips servers it already knows, so this adds only new ones.
       if (Date.now() - lastSeed >= PRIORITY_SEED_MS) {
@@ -115,6 +142,24 @@ async function proxyProducer(ctx, myToken) {
     state.proxyRelax = s.relax;
     await sleep(2000);
   }
+}
+
+// --- Post queue: new posts first ---------------------------------------------
+// Two tiers. `newQueue` holds posts not in the contact list yet; `queue` holds
+// posts already stored (re-visited only to update their relay). Workers always
+// take a new post when one is waiting. A post first listed after the run's
+// first scan is the newest, so it goes to the FRONT of newQueue; a retried post
+// goes to the back of its own tier.
+function nextItem(ctx) {
+  return ctx.newQueue.shift() || ctx.queue.shift() || null;
+}
+function requeue(ctx, item) {
+  if (item.isNew && !contacts.findByUrl(item.url)) ctx.newQueue.push(item);
+  else ctx.queue.push(item);
+}
+function updateQueueState(ctx) {
+  state.queueNew = ctx.newQueue.length;
+  state.queueRemaining = ctx.newQueue.length + ctx.queue.length + ctx.inFlight;
 }
 
 // One worker: holds a proxy + context, keeps REUSING the same proxy across posts
@@ -149,14 +194,19 @@ async function runWorker(ctx, myToken) {
         }
       }
 
-      const item = ctx.queue.shift();
+      const item = nextItem(ctx);
       if (!item) {
         if (ctx.inFlight === 0 && !ctx.collecting) break;
         await sleep(200);
         continue;
       }
+      const storedRow = contacts.findByUrl(item.url);
+      if (storedRow && storedRow.sent) {
+        ctx.pending.delete(item.url); // marked sent while queued — drop it
+        continue;
+      }
       ctx.inFlight++;
-      state.queueRemaining = ctx.queue.length + ctx.inFlight;
+      updateQueueState(ctx);
 
       try {
         item.attempts = (item.attempts || 0) + 1;
@@ -225,15 +275,15 @@ async function runWorker(ctx, myToken) {
           state.parked++;
           emit({ type: 'parked', url: item.url, tried: triedCount });
         } else {
-          ctx.queue.push(item);
+          requeue(ctx, item);
           if (gated || netErr) emit({ type: 'retry', url: item.url, attempt: item.attempts, reason: gated ? 'captcha' : row.note || 'fail' });
         }
       } catch (e) {
         if (ctx.useProxies) await dropProxy(true);
-        ctx.queue.push(item);
+        requeue(ctx, item);
       } finally {
         ctx.inFlight--;
-        state.queueRemaining = ctx.queue.length + ctx.inFlight;
+        updateQueueState(ctx);
       }
     }
   } finally {
@@ -282,6 +332,10 @@ async function runForever(params, onEvent = () => {}) {
     concurrency,
     queueTotal: 0,
     queueRemaining: 0,
+    queueNew: 0,
+    newPostsFound: 0,
+    autoRefreshes: 0,
+    lastAutoRefreshAt: null,
     areas,
     categories,
     useProxies,
@@ -304,7 +358,9 @@ async function runForever(params, onEvent = () => {}) {
 
     const queue = [];
     const ctx = {
-      queue,
+      queue, // posts already stored (relay re-visits)
+      newQueue: [], // posts not stored yet — always served first
+      everListed: new Set(), // every url seen in any scan this run
       inFlight: 0,
       collecting: true,
       // URLs currently queued or in flight. In loop mode a re-scan must not
@@ -340,7 +396,8 @@ async function runForever(params, onEvent = () => {}) {
             if (stopping()) break;
             {
               const { area, category } = jobs[j];
-              const { urls, blocked, error } = await collectPosts(null, { area, category, query: params.query, cap: PER_AREA_CAP });
+              const { urls, items, blocked, error } = await collectPosts(null, { area, category, query: params.query, cap: PER_AREA_CAP });
+              if (items && items.length) posts.seen(items, { area, category }); // the All list shows every listed post
               if (error) {
                 emit({ type: 'collect-error', area, category, error, willRetry: !jobs[j].retried });
                 if (!jobs[j].retried) jobs.push({ area, category, retried: true });
@@ -354,18 +411,33 @@ async function runForever(params, onEvent = () => {}) {
                 continue;
               }
               let added = 0;
+              let addedNew = 0;
+              // Posts already marked sent are done: never visit them again.
+              const stored = new Map(contacts.list().map((r) => [r.url, r]));
+              const justListed = []; // first listed since the run's first scan: newest
               for (const url of urls) {
-                if (seen.has(url) || ctx.pending.has(url)) continue;
+                const row = stored.get(url);
+                if (seen.has(url) || ctx.pending.has(url) || (row && row.sent)) continue;
                 seen.add(url);
                 ctx.pending.add(url);
-                queue.push({ url, area, category, attempts: 0 });
+                const firstSighting = !ctx.everListed.has(url);
+                ctx.everListed.add(url);
+                const item = { url, area, category, attempts: 0, isNew: !row };
+                if (!row) {
+                  addedNew++;
+                  // The search page lists newest first, so keep page order.
+                  if (firstSighting && state.cycles > 1) justListed.push(item);
+                  else ctx.newQueue.push(item);
+                } else queue.push(item);
                 added++;
               }
+              if (justListed.length) ctx.newQueue.unshift(...justListed);
               state.queueTotal += added;
               state.newThisCycle += added;
+              state.newPostsFound += addedNew;
               state.seenTotal = seen.size;
-              state.queueRemaining = queue.length + ctx.inFlight;
-              emit({ type: 'collected', area, category, count: urls.length, added, cycle: state.cycles });
+              updateQueueState(ctx);
+              emit({ type: 'collected', area, category, count: urls.length, added, addedNew, cycle: state.cycles });
               if (collectDelayMs && !stopping()) await sleep(collectDelayMs);
             }
           }
@@ -397,6 +469,7 @@ async function runForever(params, onEvent = () => {}) {
     if (activeBrowser === browser) activeBrowser = null;
     if (myToken === currentRunToken) activeCtx = null;
     await proxies.flush();
+    await posts.flush();
     if (myToken === currentRunToken) {
       stopRequested = false;
       state.running = false;
@@ -407,8 +480,14 @@ async function runForever(params, onEvent = () => {}) {
 }
 
 // Hand newly gathered proxies to a running scrape's broker (no-op when idle).
-function addProxies(servers) {
-  if (activeCtx && activeCtx.useProxies) activeCtx.broker.addFresh(servers);
+function addProxies(servers, { reset = false } = {}) {
+  if (!activeCtx || !activeCtx.useProxies) return;
+  if (reset) {
+    // The pool was rebuilt: re-queue it in full, verified proxies first.
+    activeCtx.broker.reset();
+    activeCtx.broker.addPriority(proxies.usable().map((p) => p.server));
+  }
+  activeCtx.broker.addFresh(servers);
 }
 
 module.exports = { runForever, stop, preflightBrowser, snapshot, addProxies };

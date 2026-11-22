@@ -444,6 +444,35 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
 .phone-copy:hover { border-color: var(--signal); color: var(--signal); }
 .phone-copy:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
 
+/* Windowed list: "Show more" row at the end (also loads on scroll) */
+.more-row td { text-align: center; padding: 14px 8px; }
+
+/* Manual entry (pencil) for a missing relay email / phone */
+.manual-slot { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.manual-empty { color: var(--muted); font-size: 12px; }
+.pencil {
+  display: inline-grid; place-items: center;
+  width: 22px; height: 22px; padding: 0;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface-2); color: var(--muted); cursor: pointer;
+}
+.pencil:hover { border-color: var(--signal); color: var(--signal); }
+.pencil:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.manual-edit { display: inline-flex; align-items: center; gap: 4px; }
+.manual-input {
+  width: 170px; min-width: 0; padding: 3px 6px;
+  border: 1px solid var(--signal); border-radius: 6px;
+  background: var(--surface); color: var(--ink); font: inherit; font-size: 12px;
+}
+.manual-save, .manual-cancel {
+  width: 22px; height: 22px; padding: 0; line-height: 1;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface-2); color: var(--muted); cursor: pointer;
+}
+.manual-save:hover { border-color: var(--ok); color: var(--ok); }
+.manual-cancel:hover { border-color: var(--bad, #c0392b); color: var(--bad, #c0392b); }
+.row-unscraped td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+
 /* Toasts (phone copy) */
 .toasts {
   position: fixed; right: 20px; bottom: 20px; z-index: 50;

@@ -5,9 +5,9 @@
 // whether or not a scrape is active. Proxies follow the main engine's rules
 // (sticky while working, relax when blocked, dropped after 10 linear failures).
 //
-// Scope: only the contacts the results list shows right now. The list filters
-// (Has phone, category, state, city, freshness, sent/unsent) are part of the
-// shared settings, so refresh follows them live, from any device.
+// Scope: only the contacts the results list shows on the device that turned
+// refresh on (its filters: Has phone, category, state, city, freshness,
+// sent/unsent, phone search). That device moves the scope live as it filters.
 //
 // Order of work: never-checked posts first, newest posted first; after that,
 // whichever post was checked longest ago. A separate HTTP sweep marks dead
@@ -22,7 +22,6 @@ const { fetchFreeProxies } = require('./proxySource');
 const { makeBroker } = require('./broker');
 const { httpGet, UA } = require('./httpGet');
 const { workPost, NET_ERR } = require('./workPost');
-const settings = require('../settings');
 const { makeFilter, isUnfiltered } = require('../contactFilter');
 
 const WORKERS = 3;
@@ -70,10 +69,37 @@ function comesBefore(a, b) {
   return Date.parse(a.checkedAt) < Date.parse(b.checkedAt);
 }
 
-// Only the contacts the results list shows right now (its filters are in the
-// shared settings): Has phone, category, state, city, freshness, sent/unsent.
+// Only the contacts the results list shows on the device that turned refresh
+// on: its filters (Has phone, category, state, city, freshness, sent/unsent,
+// phone search). That device updates the scope live as it changes them.
+let scope = { prefs: {}, owner: null };
+function setScope(prefs, owner, { force = false } = {}) {
+  if (!force && scope.owner && owner !== scope.owner) return false;
+  scope = { prefs: sanitizeScope(prefs), owner: owner ? String(owner).slice(0, 64) : null };
+  return true;
+}
+function sanitizeScope(p) {
+  p = p && typeof p === 'object' ? p : {};
+  const f = p.filters && typeof p.filters === 'object' ? p.filters : {};
+  return {
+    sentFilter: ['all', 'scraped', 'sent', 'unsent'].includes(p.sentFilter) ? p.sentFilter : 'all',
+    phone: String(p.phone || '').replace(/\D/g, '').slice(0, 15),
+    filters: {
+      state: String(f.state || ''),
+      city: String(f.city || '').slice(0, 100),
+      phoneOnly: !!f.phoneOnly,
+      category: String(f.category || ''),
+      freshness: String(f.freshness || ''),
+    },
+  };
+}
+// Memoized per contacts version + scope: /api/status asks every 2 s per open
+// page, and pickNext/sweep ask per post.
+let filterMemo = { key: null, fn: null };
 function scopeFilter() {
-  return makeFilter(settings.get().prefs, contacts.list());
+  const key = contacts.version() + '|' + JSON.stringify(scope.prefs);
+  if (filterMemo.key !== key) filterMemo = { key, fn: makeFilter(scope.prefs, contacts.list()) };
+  return filterMemo.fn;
 }
 
 // Unsent, not expired, and shown in the list — the posts refresh may work on.
@@ -219,7 +245,8 @@ async function refreshOne(ctx, hold, url) {
       continue;
     }
     if (ctx.stopped) return; // Stop closed the browser; that says nothing about the proxy
-    if (!contacts.findByUrl(url)) return;
+    const current = contacts.findByUrl(url);
+    if (!current || current.sent) return; // deleted or marked sent during the visit
 
     const proxy = hold.proxy;
     const note = scraped.note || '';
@@ -388,6 +415,7 @@ function start(params = {}, onEvent = () => {}) {
   state = blankState();
   state.running = true;
   state.startedAt = Date.now();
+  setScope(params.scope, params.deviceId, { force: true });
 
   const blockCooldownMs = Math.max(60000, Math.min(Number(params.blockCooldownMs) || 600000, 3600000));
   const ctx = {
@@ -443,18 +471,25 @@ function stop() {
   if (run.browser) run.browser.close().catch(() => {});
 }
 
+let countsMemo = { key: null, c: null, scopeCount: 0 };
 function snapshot() {
-  const c = { fresh: 0, unverified: 0, expired: 0, unchecked: 0, relayChanges: 0 };
-  for (const r of contacts.list()) {
-    c.relayChanges += r.relayChanges || 0;
-    if (r.sent) continue;
-    if (r.refreshStatus && c[r.refreshStatus] !== undefined) c[r.refreshStatus]++;
-    else c.unchecked++;
+  // Counts only change when contacts or the scope change: reuse them otherwise.
+  const key = contacts.version() + '|' + JSON.stringify(scope.prefs);
+  if (countsMemo.key !== key) {
+    const c = { fresh: 0, unverified: 0, expired: 0, unchecked: 0, relayChanges: 0 };
+    for (const r of contacts.list()) {
+      c.relayChanges += r.relayChanges || 0;
+      if (r.sent) continue;
+      if (r.refreshStatus && c[r.refreshStatus] !== undefined) c[r.refreshStatus]++;
+      else c.unchecked++;
+    }
+    countsMemo = { key, c, scopeCount: inScopeRows().length };
   }
+  const c = countsMemo.c;
   const b = run ? run.broker.sizes() : { fresh: 0, relax: 0 };
   // scope: unsent, not-expired posts in the filtered list (what refresh works on).
-  const scope = { count: inScopeRows().length, filtered: !isUnfiltered(settings.get().prefs) };
-  return { ...state, sweep: { ...state.sweep }, counts: c, scope, proxyFresh: b.fresh, proxyRelax: b.relax };
+  const scopeInfo = { count: countsMemo.scopeCount, filtered: !isUnfiltered(scope.prefs), owner: scope.owner };
+  return { ...state, sweep: { ...state.sweep }, counts: c, scope: scopeInfo, proxyFresh: b.fresh, proxyRelax: b.relax };
 }
 
-module.exports = { start, stop, snapshot, WORKERS, comesBefore, pickNext };
+module.exports = { start, stop, snapshot, setScope, WORKERS, comesBefore, pickNext };

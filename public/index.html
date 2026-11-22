@@ -57,6 +57,7 @@
             </div>
             <div class="stat"><span class="k">Workers</span><span class="v mono" id="t-workers">0 / 0</span></div>
             <div class="stat"><span class="k">Queue pending</span><span class="v mono" id="t-queue">0 / 0</span></div>
+            <div class="stat"><span class="k">New posts waiting</span><span class="v mono" id="t-newq" title="Posts not in the contact list yet. Workers always take these first.">0</span></div>
             <div class="stat stat-ok"><span class="k">Stored · contact</span><span class="v mono" id="t-stored">0</span></div>
             <div class="stat stat-ok"><span class="k">Relays caught</span><span class="v mono" id="t-relays">0</span></div>
             <div class="stat stat-bad"><span class="k">Gated (captcha)</span><span class="v mono" id="t-gated">0</span></div>
@@ -71,6 +72,7 @@
             <div class="stat"><span class="k">Proxies cooled</span><span class="v mono" id="t-proxcool">0</span></div>
             <div class="stat"><span class="k">Proxy fresh q</span><span class="v mono" id="t-proxfresh">0</span></div>
             <div class="stat"><span class="k">Proxy relax q</span><span class="v mono" id="t-proxrelax">0</span></div>
+            <div class="stat"><span class="k">Proxy auto-refresh</span><span class="v mono" id="t-autoref" title="Hourly, or after 15 min when fewer than 100 verified proxies are usable">–</span></div>
             <div class="stat"><span class="k">Solver</span><span class="v" id="t-solver">none</span></div>
             <div class="stat"><span class="k">Contacts in db</span><span class="v mono" id="t-contacts">0</span></div>
             <div class="stat"><span class="k">Memory rss</span><span class="v mono" id="t-ram">–</span></div>
@@ -136,8 +138,9 @@
 
           <div class="resultsbar">
             <div class="filters" role="group" aria-label="Sent status">
-              <button class="filter active" data-filter="all">All</button>
-              <button class="filter" data-filter="unsent">Unsent</button>
+              <button class="filter active" data-filter="all" title="Every listed post, scraped or not">All</button>
+              <button class="filter" data-filter="scraped" title="Posts whose contact was scraped or filled in">Scraped</button>
+              <button class="filter" data-filter="unsent" title="All posts not marked sent">Unsent</button>
               <button class="filter" data-filter="sent">Sent</button>
             </div>
             <label class="locfilter">

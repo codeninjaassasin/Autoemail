@@ -37,6 +37,32 @@ function listingUrls(html, area, cap) {
   return urls;
 }
 
+// Title and location for each listing url, from the static search page:
+// <li class="cl-static-search-result" title="..."><a href="URL">...
+// <div class="location"> Snohomish </div>. Missing parts come back empty.
+function listingItems(html, urls) {
+  const s = String(html || '');
+  const decode = (t) =>
+    String(t || '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;|&#x27;/g, "'")
+      .trim();
+  const info = new Map();
+  const re = /<li class="cl-static-search-result"([^>]*)>([\s\S]*?)<\/li>/gi;
+  let m;
+  while ((m = re.exec(s))) {
+    const href = (m[2].match(/href="([^"]+)"/) || [])[1];
+    if (!href) continue;
+    const title = (m[1].match(/title="([^"]*)"/) || [])[1] || (m[2].match(/<div class="title">([\s\S]*?)<\/div>/) || [])[1];
+    const location = (m[2].match(/<div class="location">([\s\S]*?)<\/div>/) || [])[1];
+    info.set(href, { title: decode(title), location: decode(location) });
+  }
+  return urls.map((url) => ({ url, ...(info.get(url) || { title: '', location: '' }) }));
+}
+
 // Returns { urls, blocked }. No browser — plain HTTP, which Craigslist serves
 // (200) while it 403-blocks headless browsers.
 // Returns { urls, blocked, error }. A network error/timeout is retried with
@@ -49,7 +75,8 @@ async function collectPosts(_ctx, { area, category, query, cap = PER_AREA_CAP, t
       const { status, html } = await httpGet(searchUrl(area, category, query), { timeout: 0 }); // no timeout
       if (isBlocked(status, html)) return { urls: [], blocked: true, error: null };
       if (status !== 200) throw new Error(`http ${status}`);
-      return { urls: listingUrls(html, area, cap), blocked: false, error: null };
+      const urls = listingUrls(html, area, cap);
+      return { urls, items: listingItems(html, urls), blocked: false, error: null };
     } catch (e) {
       lastErr = e;
       await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
@@ -58,4 +85,4 @@ async function collectPosts(_ctx, { area, category, query, cap = PER_AREA_CAP, t
   return { urls: [], blocked: false, error: lastErr ? lastErr.message : 'unknown' };
 }
 
-module.exports = { collectPosts, searchUrl, listingUrls, isBlocked, PER_AREA_CAP };
+module.exports = { collectPosts, searchUrl, listingUrls, listingItems, isBlocked, PER_AREA_CAP };

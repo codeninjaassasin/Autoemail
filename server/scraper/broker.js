@@ -21,6 +21,13 @@ function makeBroker(cooldownMs) {
       for (const s of add) known.add(s);
       fresh.unshift(...add);
     },
+    // Forget every not-yet-tried server and everything tried so far, so a fresh
+    // proxy list can be queued again in full. Cooled (relax) servers stay.
+    reset() {
+      fresh.length = 0;
+      known.clear();
+      for (const r of relax) known.add(r.server);
+    },
     // Let a server that left the pool be added again if it comes back.
     forget(server) {
       known.delete(server);

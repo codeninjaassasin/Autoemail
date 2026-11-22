@@ -14,6 +14,7 @@ const refresher = require('./scraper/refresher');
 const contacts = require('./contacts');
 const proxies = require('./proxies');
 const settings = require('./settings');
+const posts = require('./posts');
 const areas = require('./data/areas');
 const categories = require('./data/categories');
 
@@ -87,12 +88,71 @@ app.post('/api/drafts', async (req, res) => {
 });
 
 // --- Contacts store ---
-app.get('/api/contacts', (req, res) => res.json(contacts.list()));
-app.post('/api/contacts/reload', (req, res) => res.json(contacts.reload()));
+// JSON body, gzip-compressed (off the event loop) when large and accepted.
+// The full list is ~6.6 MB raw and ~1 MB gzipped, which matters over Wi-Fi.
+const zlib = require('zlib');
+function sendJson(req, res, obj) {
+  const body = Buffer.from(JSON.stringify(obj));
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  res.set('Cache-Control', 'no-store');
+  if (body.length < 32 * 1024 || !/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return res.send(body);
+  zlib.gzip(body, { level: 5 }, (err, gz) => {
+    if (err) return res.send(body);
+    res.set('Content-Encoding', 'gzip');
+    res.set('Vary', 'Accept-Encoding');
+    res.send(gz);
+  });
+}
+
+// --- List cache sync: the page keeps the whole list (contacts + listed posts)
+// in its own cache and asks only for what changed since its last sync.
+// Query: ce/cr = contacts epoch/rev, pe/pr = posts epoch/rev (omit for all).
+app.get('/api/sync', (req, res) => {
+  const q = req.query;
+  sendJson(req, res, {
+    contacts: contacts.changesSince(q.cr, q.ce),
+    posts: posts.changesSince(q.pr, q.pe),
+  });
+});
+
+app.get('/api/contacts', (req, res) => sendJson(req, res, contacts.list()));
+app.post('/api/contacts/reload', (req, res) => {
+  contacts.reload(); // re-read data/contacts.json (pages resync: new epoch)
+  res.json({ ok: true, count: contacts.count() });
+});
 app.patch('/api/contacts/:id', (req, res) => {
   const row = contacts.setSent(req.params.id, req.body.sent);
   if (!row) return res.status(404).json({ ok: false, error: 'not found' });
   res.json({ ok: true, row });
+});
+// Listed posts whose contact hasn't been scraped yet (the All list shows them
+// next to the contacts, with empty fields to fill by hand).
+app.get('/api/posts', (req, res) => {
+  const stored = new Set(contacts.list().map((r) => r.url));
+  sendJson(req, res, posts.listed().filter((p) => !stored.has(p.url)));
+});
+// Fill a relay email and/or phone by hand (pencil icon in the list).
+app.post('/api/contacts/manual', (req, res) => {
+  const b = req.body || {};
+  const url = String(b.url || '');
+  const existing = contacts.findByUrl(url);
+  const post = posts.find(url);
+  if (!existing && !post) return res.status(404).json({ ok: false, error: 'Unknown post.' });
+  const relay = b.relay === undefined ? null : String(b.relay).trim().toLowerCase();
+  if (relay !== null && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(relay)) {
+    return res.status(400).json({ ok: false, error: 'That is not an email address.' });
+  }
+  let phone = null;
+  if (b.phone !== undefined) {
+    const { phonesFrom } = require('./scraper/extract');
+    const digits = String(b.phone).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    phone = phonesFrom(digits)[0] || null;
+    if (!phone || digits.length !== 10) return res.status(400).json({ ok: false, error: 'That is not a valid US phone number.' });
+  }
+  if (!relay && !phone) return res.status(400).json({ ok: false, error: 'Nothing to save.' });
+  const out = contacts.setManual(url, { relay, phone }, post || {});
+  if (out.error) return res.status(409).json({ ok: false, error: out.error });
+  res.json({ ok: true, row: out.row });
 });
 app.delete('/api/contacts/:id', (req, res) => {
   const ok = contacts.remove(req.params.id);
@@ -116,10 +176,24 @@ app.get('/api/status', (req, res) => res.json({ ...scraper.snapshot(), refresh: 
 app.post('/api/refresh/start', (req, res) => {
   const b = req.body || {};
   const started = refresher.start(
-    { headless: b.headless, replyWaitMs: b.replyWaitMs, pageTimeoutMs: b.pageTimeoutMs, maxProxiesPerPost: b.maxProxiesPerPost },
+    {
+      headless: b.headless,
+      replyWaitMs: b.replyWaitMs,
+      pageTimeoutMs: b.pageTimeoutMs,
+      maxProxiesPerPost: b.maxProxiesPerPost,
+      scope: b.scope, // the starting device's list filters
+      deviceId: b.deviceId,
+    },
     broadcast
   );
   if (!started) return res.status(409).json({ ok: false, error: 'Refresh is already running.' });
+  res.json({ ok: true });
+});
+// The device that started refresh moves its scope as it changes its filters.
+app.put('/api/refresh/scope', (req, res) => {
+  const b = req.body || {};
+  const ok = refresher.setScope(b.scope, b.deviceId);
+  if (!ok) return res.status(409).json({ ok: false, error: 'Refresh was started on another device.' });
   res.json({ ok: true });
 });
 app.post('/api/refresh/stop', (req, res) => {
@@ -133,15 +207,9 @@ app.post('/api/refresh/stop', (req, res) => {
 // New proxies are verified by use while a run is active.
 app.post('/api/proxies/refresh', async (req, res) => {
   try {
-    const { fetchFreeProxies } = require('./scraper/proxySource');
-    const mode = req.query.mode || 'keep-verified';
-    let pruned = null;
-    if (mode === 'empty') proxies.rebuild(); // archive old, start empty
-    else if (mode === 'keep-verified') pruned = proxies.pruneUnverified();
-    const { proxies: found, perSource } = await fetchFreeProxies();
-    const added = proxies.addProxies(found);
-    await proxies.flush();
-    scraper.addProxies(found.map((p) => p.server)); // feed a running scrape now
+    const { refreshPool } = require('./scraper/proxyRefresh');
+    const { mode, pruned, found, added, perSource } = await refreshPool(req.query.mode || 'keep-verified');
+    scraper.addProxies(found.map((p) => p.server), { reset: mode !== 'add' }); // feed a running scrape now
     res.json({ ok: true, mode, pruned, found: found.length, added, perSource, stats: proxies.stats() });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -173,6 +241,7 @@ app.post('/api/contacts/backfill-posted', (req, res) => {
             const d = postedFromHtml(html);
             if (d) {
               r.postedAt = d; // row object lives in the contacts cache
+              contacts.touch(r);
               backfill.filled++;
             } else backfill.failed++;
           }
@@ -354,3 +423,5 @@ if (missing.length) {
 app.listen(config.port, () => {
   console.log(`Autoemail running at http://localhost:${config.port}`);
 });
+// Background: posted dates for listed posts not scraped yet (All list sorting).
+require('./postDates').start(broadcast);

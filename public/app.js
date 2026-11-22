@@ -174,8 +174,22 @@ function makeMultiselect(el, items, { valueKey, labelFn, allowAdd, onChange = ()
 // the same settings, and a change on one device shows up on the others within
 // a few seconds. localStorage is only an offline fallback. If a run is active,
 // the server's actual areas/categories win on page load.
+// Exception: the results-list filters (sent tab, category, state, city, Has
+// phone, freshness) are per device — saved in this browser only — so each
+// device can filter differently.
 const STORE_KEY = 'autoemail.scraper.v1';
-const CLIENT_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+const LOCAL_ONLY = ['filters', 'sentFilter'];
+const CLIENT_ID = Math.random().toString(36).slice(2) + Date.now().toString(36); // this tab
+// This browser, across reloads: owns the refresh scope it started.
+const DEVICE_ID = (() => {
+  try {
+    let id = localStorage.getItem('autoemail.deviceId');
+    if (!id) localStorage.setItem('autoemail.deviceId', (id = 'd' + Math.random().toString(36).slice(2, 12)));
+    return id;
+  } catch {
+    return CLIENT_ID;
+  }
+})();
 const shared = window.__SHARED_SETTINGS__;
 let settingsVersion = shared ? shared.version || 0 : 0;
 const localPrefs = (() => {
@@ -185,8 +199,13 @@ const localPrefs = (() => {
     return {};
   }
 })();
-const serverHasPrefs = !!(shared && shared.prefs && Object.keys(shared.prefs).length);
-let prefs = serverHasPrefs ? { ...shared.prefs } : { ...localPrefs };
+const pickKeys = (o, keys) => Object.fromEntries(keys.filter((k) => o && o[k] !== undefined).map((k) => [k, o[k]]));
+const omitKeys = (o, keys) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !keys.includes(k)));
+const sharedPrefs = omitKeys(shared && shared.prefs, LOCAL_ONLY);
+const serverHasPrefs = Object.keys(sharedPrefs).length > 0;
+// Filters: this browser's own; else (first time) the copy the server used to share.
+const localFilters = { ...pickKeys(shared && shared.prefs, LOCAL_ONLY), ...pickKeys(localPrefs, LOCAL_ONLY) };
+let prefs = { ...(serverHasPrefs ? sharedPrefs : omitKeys(localPrefs, LOCAL_ONLY)), ...localFilters };
 let pendingPatch = {};
 let prefsTimer = null;
 
@@ -222,7 +241,12 @@ function writePrefs({ keepalive = false } = {}) {
 }
 function savePrefs(patch) {
   prefs = { ...prefs, ...patch };
-  pendingPatch = { ...pendingPatch, ...patch };
+  const sharedPart = omitKeys(patch, LOCAL_ONLY);
+  if (!Object.keys(sharedPart).length) {
+    cacheLocally(); // filters only: this browser, nothing to send
+    return;
+  }
+  pendingPatch = { ...pendingPatch, ...sharedPart };
   clearTimeout(prefsTimer);
   prefsTimer = setTimeout(writePrefs, 300);
 }
@@ -230,8 +254,15 @@ function savePrefs(patch) {
 window.addEventListener('pagehide', () => {
   if (prefsTimer) writePrefs({ keepalive: true });
 });
+cacheLocally(); // keep this browser's filters, even ones taken from the old shared copy
 // First device after this update: move its browser-saved settings to the server.
-if (shared && !serverHasPrefs && Object.keys(localPrefs).length) savePrefs(localPrefs);
+if (shared && !serverHasPrefs && Object.keys(omitKeys(localPrefs, LOCAL_ONLY)).length) savePrefs(omitKeys(localPrefs, LOCAL_ONLY));
+// Filters used to be shared: remove the old copy from the server.
+if (shared && shared.prefs && LOCAL_ONLY.some((k) => shared.prefs[k] !== undefined)) {
+  pendingPatch = { ...pendingPatch, ...Object.fromEntries(LOCAL_ONLY.map((k) => [k, null])) };
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(writePrefs, 300);
+}
 
 // Pick up changes saved by other devices.
 async function pollSettings() {
@@ -242,7 +273,8 @@ async function pollSettings() {
     settingsVersion = s.version || 0;
     if (s.updatedBy === CLIENT_ID) return; // our own save coming back
     // Unsent local edits win over the incoming copy.
-    prefs = { ...(s.prefs || {}), ...pendingPatch };
+    // Unsent local edits win; this device's own filters are never replaced.
+    prefs = { ...omitKeys(s.prefs, LOCAL_ONLY), ...pendingPatch, ...pickKeys(prefs, LOCAL_ONLY) };
     cacheLocally();
     applySharedPrefs();
   } catch {
@@ -269,16 +301,7 @@ function applySharedPrefs() {
   if (setupEl.open !== (prefs.setupOpen !== false)) setupEl.open = prefs.setupOpen !== false;
   applyTracerMode(!!prefs.tracerFull);
   applyTraceHidden(!!prefs.traceHidden);
-  setSentFilter(prefs.sentFilter || 'all');
-  const f = prefs.filters || {};
-  stateFilter = f.state || '';
-  cityFilter = f.city || '';
-  if (cityFilterEl !== active) cityFilterEl.value = cityFilter;
-  phoneOnly = !!f.phoneOnly;
-  phoneOnlyEl.checked = phoneOnly;
-  catFilter = f.category || '';
-  freshFilter = f.freshness || '';
-  freshFilterEl.value = freshFilter;
+  // List filters are per device: left as they are.
   updateRunSentence();
   renderRows();
 }
@@ -449,6 +472,10 @@ async function pollStatus() {
     document.getElementById('t-proxcool').textContent = s.proxies.cooled ?? 0;
     document.getElementById('t-proxfresh').textContent = s.proxyFresh ?? 0;
     document.getElementById('t-proxrelax').textContent = s.proxyRelax ?? 0;
+    document.getElementById('t-newq').textContent = s.queueNew ?? 0;
+    document.getElementById('t-autoref').textContent = s.autoRefreshes
+      ? `${s.autoRefreshes}× · ${fmtAge(new Date(s.lastAutoRefreshAt).toISOString())}`
+      : 'none yet';
     document.getElementById('t-contacts').textContent = s.contacts.total;
     document.getElementById('t-ram').textContent = fmtBytes(s.memory.rss);
     document.getElementById('t-heap').textContent = fmtBytes(s.memory.heapUsed);
@@ -465,11 +492,9 @@ function renderRefresh(r) {
   stateEl.textContent = r.stopping ? 'stopping…' : on ? `${r.activeWorkers}/${r.workers} workers` : r.error ? `stopped: ${r.error}` : 'off';
   stateEl.classList.toggle('on', on);
   stateEl.classList.toggle('bad', !on && !!r.error);
-  if (r.scope) {
-    document.getElementById('r-scope').innerHTML = r.scope.filtered
-      ? `<b>${r.scope.count}</b> in filtered list`
-      : `<b>${r.scope.count}</b> in list (no filter)`;
-  }
+  lastRefreshScope = r.running ? r.scope : null;
+  refreshOwner = r.running && r.scope ? r.scope.owner : null;
+  renderScope();
   document.getElementById('r-fresh').textContent = r.counts.fresh;
   document.getElementById('r-unverified').textContent = r.counts.unverified;
   document.getElementById('r-expired').textContent = r.counts.expired;
@@ -485,7 +510,6 @@ setInterval(pollStatus, 2000);
 pollStatus();
 
 // ---------- Contacts table ----------
-let rows = [];
 let filter = 'all';
 const tbody = document.querySelector('#scrapeTable tbody');
 const stateFilterEl = document.getElementById('stateFilter');
@@ -503,6 +527,44 @@ let freshFilter = (prefs.filters && prefs.filters.freshness) || '';
 freshFilterEl.value = freshFilter;
 function saveFilters() {
   savePrefs({ filters: { state: stateFilter, city: cityFilter, phoneOnly, category: catFilter, freshness: freshFilter } });
+  pushRefreshScope();
+}
+
+// --- Relay refresh scope: the list as THIS device filters it ---------------
+// The device that turns refresh on owns its scope; while it runs, that
+// device's filter changes (including the phone search) move the scope with it.
+function currentScope() {
+  return { filters: prefs.filters || {}, sentFilter: prefs.sentFilter || 'all', phone: phoneQuery || '' };
+}
+let refreshOwner = null; // DEVICE_ID that owns the running refresh, from /api/status
+let lastRefreshScope = null; // server's scope while refresh runs
+let localScopeCount = 0; // unsent, not-expired posts in this device's list
+function renderScope() {
+  const el = document.getElementById('r-scope');
+  if (!el) return;
+  const s = lastRefreshScope;
+  if (s) {
+    const who = s.owner === DEVICE_ID ? "this device's list" : "another device's list";
+    el.innerHTML = `checking <b>${s.count}</b> in ${who}`;
+    el.title = s.owner === DEVICE_ID
+      ? 'Refresh follows the filters on this device.'
+      : 'Refresh follows the filters of the device that turned it on. Turn it off and on here to use this list.';
+  } else {
+    el.innerHTML = `<b>${localScopeCount}</b> in this list`;
+    el.title = 'Turning refresh on here checks the unsent posts this list shows; its filters set the scope.';
+  }
+}
+let scopeTimer = null;
+function pushRefreshScope() {
+  if (refreshOwner !== DEVICE_ID) return;
+  clearTimeout(scopeTimer);
+  scopeTimer = setTimeout(() => {
+    fetch('/api/refresh/scope', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: currentScope(), deviceId: DEVICE_ID }),
+    }).catch(() => {});
+  }, 400);
 }
 freshFilterEl.addEventListener('change', () => {
   freshFilter = freshFilterEl.value;
@@ -513,7 +575,7 @@ freshFilterEl.addEventListener('change', () => {
 // Category dropdown lists only categories present in the stored results, with counts.
 function rebuildCategoryOptions() {
   const counts = new Map();
-  for (const r of rows) counts.set(r.category || '', (counts.get(r.category || '') || 0) + 1);
+  for (const r of viewRows()) counts.set(r.category || '', (counts.get(r.category || '') || 0) + 1);
   const codes = [...counts.keys()].filter(Boolean).sort((a, b) =>
     String(catMeta.get(a) || a).localeCompare(String(catMeta.get(b) || b))
   );
@@ -541,7 +603,7 @@ function locOf(r) {
 // State dropdown lists only states present in the stored results, with counts.
 function rebuildStateOptions() {
   const counts = new Map();
-  for (const r of rows) {
+  for (const r of viewRows()) {
     const st = locOf(r).state || '';
     counts.set(st, (counts.get(st) || 0) + 1);
   }
@@ -607,104 +669,206 @@ function matchesPhone(r) {
 phoneFilterEl.addEventListener('input', () => {
   phoneQuery = phoneDigits(phoneFilterEl.value);
   renderRows();
+  pushRefreshScope();
 });
 
+// --- Rendering: batched, windowed, delegated ---------------------------------
+// renderRows() only schedules a paint (once per animation frame), so a burst
+// of events costs one paint. The filtered + sorted list is kept in memory and
+// only the first `renderLimit` rows go into the DOM; more are added as the
+// sentinel row scrolls into view. Row buttons use one delegated listener.
+const PAGE_ROWS = 200;
+let renderLimit = PAGE_ROWS;
+let renderQueued = false;
+let lastFilterKey = '';
 function renderRows() {
-  rebuildStateOptions();
-  rebuildCategoryOptions();
-  const effCat = catFilterEl.value; // '' if the saved category isn't present
-  const filtered = rows.filter(
-    (r) =>
-      (filter === 'all' ? true : filter === 'sent' ? r.sent : !r.sent) &&
-      (!effCat || r.category === effCat) &&
-      (!phoneOnly || (r.phones && r.phones.length > 0)) &&
-      (!freshFilter || (r.refreshStatus || 'unchecked') === freshFilter) &&
-      matchesLocation(r) &&
-      matchesPhone(r)
-  ).sort((a, b) => {
-    // Newest posted first; rows without a posted date go last.
-    const ta = a.postedAt ? Date.parse(a.postedAt) : -Infinity;
-    const tb = b.postedAt ? Date.parse(b.postedAt) : -Infinity;
-    return tb - ta;
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    paintRows();
   });
-  tbody.innerHTML = filtered
-    .map((r) => {
-      const loc = locOf(r);
-      const title = esc(r.title || '(untitled)');
-      const post = r.url
-        ? `<a class="title-clamp" href="${esc(r.url)}" target="_blank" rel="noopener" title="${title}">${title}</a>`
-        : `<span class="title-clamp" title="${title}">${title}</span>`;
-      const others = (r.emails || []).filter((e) => e !== r.relay && !/craigslist\.org$/i.test(e));
-      const relay = r.relay
-        ? `<button type="button" class="relay-copy" data-copy="${esc(r.relay)}" title="${esc(r.relay)} — click to copy">${esc(shortRelay(r.relay))}</button>`
-        : '';
-      return `<tr>
-      <td><input type="checkbox" class="sent-cb" data-id="${r.id}" ${r.sent ? 'checked' : ''} aria-label="Mark sent"/></td>
-      <td><span class="loc-name">${esc(loc.name)}</span><span class="loc-sub">${esc(r.area || '')} / ${esc(r.category || '')}</span></td>
-      <td>${fmtPosted(r.postedAt)}</td>
-      <td>${post}</td>
-      <td>${relay}</td>
-      <td>${fmtChecked(r)}</td>
-      <td>${(r.phones || [])
+}
+
+// Data version: bumped on every change to rows/listedPosts.
+let dataVer = 0;
+function dataChanged() {
+  dataVer++;
+  saveListCache();
+  renderRows();
+}
+
+let sortedMemo = { ver: -1, list: [] };
+const postedKey = (r) => (r.postedAt ? Date.parse(r.postedAt) || -Infinity : -Infinity);
+function sortedAll() {
+  // Newest posted first; rows without a posted date go last. Sorted once per
+  // data change, not per filter change or paint.
+  if (sortedMemo.ver !== dataVer) {
+    const list = viewRows().slice();
+    for (const r of list) r._pk = postedKey(r);
+    list.sort((a, b) => b._pk - a._pk);
+    sortedMemo = { ver: dataVer, list };
+  }
+  return sortedMemo.list;
+}
+
+function rowHtml(r) {
+  const loc = locOf(r);
+  const title = esc(r.title || '(untitled)');
+  const post = r.url
+    ? `<a class="title-clamp" href="${esc(r.url)}" target="_blank" rel="noopener" title="${title}">${title}</a>`
+    : `<span class="title-clamp" title="${title}">${title}</span>`;
+  const others = (r.emails || []).filter((e) => e !== r.relay && !/craigslist\.org$/i.test(e));
+  const relay = r.relay
+    ? `<button type="button" class="relay-copy" data-copy="${esc(r.relay)}" title="${esc(r.relay)} — click to copy">${esc(shortRelay(r.relay))}</button>`
+    : pencilCell(r, 'relay');
+  const phones = (r.phones || []).length
+    ? r.phones
         .map(
           (p) =>
             `<span class="phone-line">${fmtPhone(p)}<button type="button" class="phone-copy" data-id="${r.id}" data-phone="${esc(p)}" title="Copy and mark sent" aria-label="Copy ${esc(p)} and mark sent">${COPY_ICON}</button></span>`
         )
-        .join('')}</td>
+        .join('')
+    : pencilCell(r, 'phone');
+  const sentCell = r.unscraped
+    ? '<input type="checkbox" disabled title="Fill a relay email or phone first" aria-label="Mark sent (fill a contact first)"/>'
+    : `<input type="checkbox" class="sent-cb" data-id="${r.id}" ${r.sent ? 'checked' : ''} aria-label="Mark sent"/>`;
+  const checked = r.unscraped ? '<span class="posted-none">Not scraped</span>' : fmtChecked(r);
+  const del = r.unscraped
+    ? ''
+    : `<button class="del-row" data-id="${r.id}" title="Delete record" aria-label="Delete record">✕</button>`;
+  const note = r.unscraped ? '' : `${r.captchaBlocked ? 'captcha ' : ''}${r.manual ? 'filled by hand ' : ''}${r.note || ''}`;
+  return `<tr${r.unscraped ? ' class="row-unscraped"' : ''}>
+      <td>${sentCell}</td>
+      <td><span class="loc-name">${esc(loc.name)}</span><span class="loc-sub">${esc(r.area || '')} / ${esc(r.category || '')}</span></td>
+      <td>${fmtPosted(r.postedAt)}</td>
+      <td>${post}</td>
+      <td>${relay}</td>
+      <td>${checked}</td>
+      <td>${phones}</td>
       <td>${others.map(esc).join('<br>')}</td>
-      <td><span class="note-clamp">${r.captchaBlocked ? 'captcha ' : ''}${esc(r.note || '')}</span></td>
-      <td><button class="del-row" data-id="${r.id}" title="Delete record" aria-label="Delete record">✕</button></td></tr>`;
-    })
-    .join('');
-  tbody.querySelectorAll('.relay-copy').forEach((btn) =>
-    btn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(btn.dataset.copy);
-        const prev = btn.textContent;
-        btn.textContent = 'Copied';
-        btn.classList.add('copied');
-        setTimeout(() => {
-          btn.textContent = prev;
-          btn.classList.remove('copied');
-        }, 1200);
-      } catch {
-        window.prompt('Copy relay email:', btn.dataset.copy);
-      }
-    })
+      <td><span class="note-clamp">${esc(note.trim())}</span></td>
+      <td>${del}</td></tr>`;
+}
+
+let currentFiltered = [];
+function paintRows() {
+  rebuildStateOptions();
+  rebuildCategoryOptions();
+  const effCat = catFilterEl.value; // '' if the saved category isn't present
+  // All: every listed post (scraped or not) · Scraped: contacts · Unsent: All
+  // minus sent · Sent: contacts marked sent.
+  const all = sortedAll();
+  const filtered = all.filter(
+    (r) =>
+      (filter === 'all' ? true : filter === 'scraped' ? !r.unscraped : filter === 'sent' ? r.sent : !r.sent) &&
+      (!effCat || r.category === effCat) &&
+      (!phoneOnly || (r.phones && r.phones.length > 0)) &&
+      (!freshFilter || (!r.sent && !r.unscraped && (r.refreshStatus || 'unchecked') === freshFilter)) && // sent: no freshness
+      matchesLocation(r) &&
+      matchesPhone(r)
   );
-  tbody.querySelectorAll('.phone-copy').forEach((btn) => btn.addEventListener('click', () => copyPhone(btn)));
-  tbody.querySelectorAll('.del-row').forEach((btn) =>
-    btn.addEventListener('click', async () => {
-      const res = await fetch(`/api/contacts/${btn.dataset.id}`, { method: 'DELETE' });
-      if (!res.ok) return;
-      rows = rows.filter((r) => r.id !== btn.dataset.id);
-      renderRows();
-    })
-  );
-  tbody.querySelectorAll('.sent-cb').forEach((cb) =>
-    cb.addEventListener('change', async () => {
-      await fetch(`/api/contacts/${cb.dataset.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sent: cb.checked }),
-      });
-      const row = rows.find((r) => r.id === cb.dataset.id);
-      if (row) row.sent = cb.checked;
-      renderRows();
-    })
-  );
+  currentFiltered = filtered;
+  // A filter change starts the window over at the top; a data change keeps it.
+  const filterKey = [filter, effCat, phoneOnly, freshFilter, stateFilter, cityFilter, phoneQuery].join('|');
+  if (filterKey !== lastFilterKey) {
+    lastFilterKey = filterKey;
+    renderLimit = PAGE_ROWS;
+  }
+  // What relay refresh would check if this device turned it on now.
+  localScopeCount = filtered.filter((r) => !r.unscraped && !r.sent && r.url && r.refreshStatus !== 'expired').length;
+  renderScope();
+  const shown = filtered.slice(0, renderLimit);
+  const more = filtered.length - shown.length;
+  tbody.innerHTML =
+    shown.map(rowHtml).join('') +
+    (more > 0
+      ? `<tr class="more-row"><td colspan="10"><button type="button" class="ghost sm more-btn">Show ${Math.min(PAGE_ROWS, more)} more (${more} left)</button></td></tr>`
+      : '');
+  const sentinel = tbody.querySelector('.more-row');
+  if (sentinel) moreObserver.observe(sentinel);
   document.getElementById('rowCount').textContent =
-    filtered.length === rows.length ? `${rows.length} contacts` : `${filtered.length} of ${rows.length} contacts`;
+    filtered.length === all.length
+      ? `${all.length} posts · ${rows.length} scraped`
+      : `${filtered.length} of ${all.length} posts · ${rows.length} scraped`;
   const empty = document.getElementById('emptyState');
   if (empty) {
     empty.hidden = filtered.length > 0;
-    empty.textContent = rows.length
+    empty.textContent = all.length
       ? phoneQuery
         ? 'No contacts match this phone number with the current filters. Set the other filters to All to search every record.'
         : 'No contacts match these filters. Clear the category, state, city, freshness or Has phone filter to see all.'
-      : 'No contacts yet. Pick areas and start a scrape — only posts with a contact land here.';
+      : 'No posts yet. Pick areas and start a scrape — listed posts appear here, and their contacts fill in as they are scraped.';
   }
 }
+
+// Add the next page of rows (scroll reached the end, or "Show more").
+function showMoreRows() {
+  if (renderLimit >= currentFiltered.length) return;
+  renderLimit += PAGE_ROWS;
+  renderRows();
+}
+const moreObserver = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        moreObserver.disconnect();
+        showMoreRows();
+      }
+    }
+  },
+  { rootMargin: '400px' }
+);
+
+// One listener for every row button (rows are re-created on each paint).
+tbody.addEventListener('click', async (e) => {
+  const t = e.target.closest('button');
+  if (!t || !tbody.contains(t)) return;
+  if (t.classList.contains('more-btn')) return showMoreRows();
+  if (t.classList.contains('phone-copy')) return copyPhone(t);
+  if (t.classList.contains('pencil')) return openManualEditor(t);
+  if (t.classList.contains('relay-copy')) {
+    try {
+      await navigator.clipboard.writeText(t.dataset.copy);
+      const prev = t.textContent;
+      t.textContent = 'Copied';
+      t.classList.add('copied');
+      setTimeout(() => {
+        t.textContent = prev;
+        t.classList.remove('copied');
+      }, 1200);
+    } catch {
+      window.prompt('Copy relay email:', t.dataset.copy);
+    }
+    return;
+  }
+  if (t.classList.contains('del-row')) {
+    const res = await fetch(`/api/contacts/${t.dataset.id}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    rows = rows.filter((r) => r.id !== t.dataset.id);
+    dataChanged();
+  }
+});
+tbody.addEventListener('change', async (e) => {
+  const cb = e.target;
+  if (!cb.classList || !cb.classList.contains('sent-cb')) return;
+  const row = rows.find((r) => r.id === cb.dataset.id);
+  if (row) row.sent = cb.checked; // optimistic: the list updates at once
+  dataChanged();
+  const res = await fetch(`/api/contacts/${cb.dataset.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sent: cb.checked }),
+  }).catch(() => null);
+  if (!res || !res.ok) {
+    if (row) row.sent = !cb.checked; // undo
+    dataChanged();
+    showToast({ kicker: 'Not saved', title: 'Sent flag', body: 'The server did not accept the change.', tone: 'bad' });
+  } else {
+    const data = await res.json().catch(() => null);
+    if (data && data.row) applyContactRows([data.row]);
+  }
+});
 // Posted date: "Sep 15" (+ year if not this year), age underneath, full time on hover.
 function fmtPosted(iso) {
   if (!iso) return '<span class="posted-none">–</span>';
@@ -728,6 +892,7 @@ function fmtAge(iso) {
   return days === 1 ? '1 day ago' : `${days} days ago`;
 }
 function fmtChecked(r) {
+  if (r.sent) return '<span class="posted-none" title="Sent contacts are not freshness-checked">—</span>';
   if (!r.refreshStatus) return '<span class="posted-none">Not checked</span>';
   const labels = { fresh: 'Fresh', unverified: 'Unverified', expired: 'Expired' };
   const hover = r.relayCheckedAt
@@ -840,16 +1005,14 @@ async function copyPhone(btn) {
   }
   if (marked) {
     row.sent = true;
-    renderRows();
+    dataChanged();
     showToast({ kicker: 'Copied · marked sent', title: text, body: adTitle });
   } else {
     showToast({ kicker: "Copied · couldn't mark sent", title: text, body: adTitle, tone: 'bad' });
   }
 }
 function upsertRow(row) {
-  const i = rows.findIndex((r) => r.url === row.url);
-  if (i >= 0) rows[i] = { ...rows[i], ...row };
-  else rows.push(row);
+  applyContactRows([row]);
 }
 
 function setSentFilter(value) {
@@ -862,18 +1025,210 @@ document.querySelectorAll('.filter').forEach((b) =>
     setSentFilter(b.dataset.filter);
     savePrefs({ sentFilter: b.dataset.filter });
     renderRows();
+    pushRefreshScope();
   })
 );
 
-async function loadContacts() {
-  rows = await (await fetch('/api/contacts')).json();
-  renderRows();
-}
-loadContacts();
+// --- List cache --------------------------------------------------------------
+// The page keeps the WHOLE list (every contact + every listed post) in memory
+// and in IndexedDB; filtering happens here, never on the server. On open it
+// paints from IndexedDB at once, then asks the server only for what changed
+// (/api/sync with the last epoch/rev it has). Polled every few seconds and
+// after scrape events, so other devices' changes show up without a reload.
+let rows = []; // contacts
+let listedPosts = []; // listed posts (the server's whole list; scraped ones are hidden by viewRows)
+const listState = { ce: '', cr: 0, pe: '', pr: 0 };
+const SYNC_MS = 4000;
 
+function applyContactRows(changed, deletedIds = []) {
+  if (!changed.length && !deletedIds.length) return false;
+  const byId = new Map(rows.map((r, i) => [r.id, i]));
+  for (const r of changed) {
+    const i = byId.get(r.id);
+    if (i !== undefined) rows[i] = r;
+    else {
+      // A row sent by a scrape event has no id match yet if it's new.
+      const j = rows.findIndex((x) => x.url === r.url);
+      if (j >= 0) rows[j] = { ...rows[j], ...r };
+      else rows.push(r);
+    }
+  }
+  if (deletedIds.length) {
+    const gone = new Set(deletedIds);
+    rows = rows.filter((r) => !gone.has(r.id));
+  }
+  dataChanged();
+  return true;
+}
+
+function applyPostRows(changed, removedUrls = []) {
+  if (!changed.length && !removedUrls.length) return false;
+  const byUrl = new Map(listedPosts.map((p, i) => [p.url, i]));
+  for (const p of changed) {
+    const i = byUrl.get(p.url);
+    if (i !== undefined) listedPosts[i] = p;
+    else listedPosts.push(p);
+  }
+  if (removedUrls.length) {
+    const gone = new Set(removedUrls);
+    listedPosts = listedPosts.filter((p) => !gone.has(p.url));
+  }
+  dataChanged();
+  return true;
+}
+
+let syncing = null;
+async function syncList() {
+  if (syncing) return syncing;
+  syncing = (async () => {
+    try {
+      const q = new URLSearchParams(listState).toString();
+      const res = await fetch('/api/sync?' + q, { cache: 'no-store' });
+      if (!res.ok) return;
+      const d = await res.json();
+      let changed = false;
+      if (d.contacts.full) {
+        rows = d.contacts.rows;
+        changed = true;
+      } else changed = applyContactRows(d.contacts.rows, d.contacts.deleted) || changed;
+      if (d.posts.full) {
+        listedPosts = d.posts.rows;
+        changed = true;
+      } else changed = applyPostRows(d.posts.rows, d.posts.removed) || changed;
+      Object.assign(listState, { ce: d.contacts.epoch, cr: d.contacts.rev, pe: d.posts.epoch, pr: d.posts.rev });
+      if (changed) dataChanged();
+      else saveListCache();
+    } catch {
+      /* offline: keep showing the cached list */
+    } finally {
+      syncing = null;
+    }
+  })();
+  return syncing;
+}
+// Old name, kept for the event handlers below.
+const loadContacts = syncList;
+setInterval(() => {
+  if (!document.hidden) syncList();
+}, SYNC_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) syncList();
+});
+
+// IndexedDB: one record holding the list and the sync position.
+const IDB_NAME = 'autoemail-cache';
+function idb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+let cacheTimer = null;
+function saveListCache() {
+  clearTimeout(cacheTimer);
+  cacheTimer = setTimeout(async () => {
+    try {
+      const db = await idb();
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put({ rows, listedPosts, listState: { ...listState }, savedAt: Date.now() }, 'list');
+    } catch {
+      /* private mode etc.: the page still works, it just loads from the server */
+    }
+  }, 8000); // a full copy costs ~50 ms: write it after things settle
+}
+async function loadListCache() {
+  try {
+    const db = await idb();
+    const rec = await new Promise((resolve, reject) => {
+      const req = db.transaction('kv').objectStore('kv').get('list');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    if (rec && Array.isArray(rec.rows)) {
+      rows = rec.rows;
+      listedPosts = rec.listedPosts || [];
+      Object.assign(listState, rec.listState || {});
+      dataVer++;
+      renderRows();
+    }
+  } catch {
+    /* no cache yet */
+  }
+}
+
+// --- All list: listed posts not scraped yet, shown next to the contacts ---
+// Memoized per data version. Posts not seen on a search page for 3 days are
+// treated as expired.
+const LISTED_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+let viewMemo = { ver: -1, list: [] };
+function viewRows() {
+  if (viewMemo.ver === dataVer) return viewMemo.list;
+  const have = new Set(rows.map((r) => r.url));
+  const cutoff = Date.now() - LISTED_MAX_AGE_MS;
+  const extra = listedPosts
+    .filter((p) => !have.has(p.url) && !p.gone && !(p.lastSeenAt && Date.parse(p.lastSeenAt) < cutoff))
+    .map((p) => ({ ...p, unscraped: true, id: null, sent: false, phones: [], emails: [], relay: null }));
+  viewMemo = { ver: dataVer, list: extra.length ? rows.concat(extra) : rows };
+  return viewMemo.list;
+}
+
+// Pencil icon: fill a relay email or phone by hand.
+const PENCIL_ICON =
+  '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M11.2 2.3l2.5 2.5-7.9 7.9-3.1.6.6-3.1z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+function pencilCell(r, field) {
+  if (r.sent) return '<span class="posted-none">–</span>';
+  const label = field === 'relay' ? 'relay email' : 'phone number';
+  return `<span class="manual-slot"><span class="manual-empty">${r.unscraped ? 'not scraped' : '–'}</span><button type="button" class="pencil" data-url="${esc(r.url)}" data-field="${field}" title="Fill ${label} by hand" aria-label="Fill ${label} by hand">${PENCIL_ICON}</button></span>`;
+}
+function openManualEditor(btn) {
+  const td = btn.closest('td');
+  const field = btn.dataset.field;
+  const url = btn.dataset.url;
+  td.innerHTML = `<span class="manual-edit"><input type="${field === 'relay' ? 'email' : 'tel'}" class="manual-input" placeholder="${field === 'relay' ? 'name@example.com' : '(555) 123-4567'}" aria-label="${field === 'relay' ? 'Relay email' : 'Phone number'}"/><button type="button" class="manual-save" title="Save">✓</button><button type="button" class="manual-cancel" title="Cancel">✕</button></span>`;
+  const input = td.querySelector('input');
+  input.focus();
+  const cancel = () => renderRows();
+  const save = async () => {
+    const value = input.value.trim();
+    if (!value) return cancel();
+    input.disabled = true;
+    try {
+      const res = await fetch('/api/contacts/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, [field]: value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        showToast({ kicker: 'Not saved', title: value, body: data.error || 'Could not save.', tone: 'bad' });
+        input.disabled = false;
+        input.focus();
+        return;
+      }
+      showToast({ kicker: 'Saved', title: value, body: data.row.title || url });
+      applyContactRows([data.row]);
+    } catch (err) {
+      showToast({ kicker: 'Not saved', title: value, body: err.message, tone: 'bad' });
+      input.disabled = false;
+    }
+  };
+  td.querySelector('.manual-save').addEventListener('click', save);
+  td.querySelector('.manual-cancel').addEventListener('click', cancel);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') save();
+    else if (e.key === 'Escape') cancel();
+  });
+}
+// Paint from the browser cache at once, then catch up with the server.
+loadListCache().then(syncList);
+
+// Reload: the server re-reads its files; then fetch the whole list again.
 document.getElementById('reloadData').addEventListener('click', async () => {
-  rows = await (await fetch('/api/contacts/reload', { method: 'POST' })).json();
-  renderRows();
+  await fetch('/api/contacts/reload', { method: 'POST' });
+  Object.assign(listState, { ce: '', cr: 0, pe: '', pr: 0 });
+  syncList();
 });
 
 document.getElementById('refreshProxies').addEventListener('click', async (e) => {
@@ -899,8 +1254,7 @@ document.getElementById('refreshProxies').addEventListener('click', async (e) =>
 document.getElementById('dedupe').addEventListener('click', async () => {
   const r = await (await fetch('/api/contacts/dedupe', { method: 'POST' })).json();
   alert(`Removed ${r.removed} duplicate-phone contacts. ${r.count.total} remain.`);
-  rows = await (await fetch('/api/contacts')).json();
-  renderRows();
+  syncList();
 });
 
 // ---------- Scraper (server-side run; this page only attaches to its events) ----------
@@ -963,6 +1317,8 @@ function handleEvent(e) {
     addLog(`⚠ fetch failed ${e.area}/${e.category}: ${e.error}${e.willRetry ? ' — retrying at end of cycle' : ' — gave up this cycle'}`);
   } else if (e.type === 'proxies-fetched') {
     addLog(`proxies fetched: ${e.count} (stored ${e.stats.stored})`);
+  } else if (e.type === 'proxies-auto-refresh') {
+    addLog(`↻ proxy pool auto-refreshed (${e.reason}): kept ${e.kept} verified, removed ${e.removed} unverified, gathered ${e.found}`);
   } else if (e.type === 'parked') {
     addLog(`parked (tried ${e.tried} proxies): ${e.url}`);
   } else if (e.type === 'cycle-done') {
@@ -972,7 +1328,7 @@ function handleEvent(e) {
     addLog(`retry #${e.attempt} (${e.reason}): ${e.url}`);
   } else if (e.type === 'dropped') {
     addLog(`dropped (${e.reason || ''}): ${e.url}`);
-  } else if (e.type === 'contacts-updated') {
+  } else if (e.type === 'contacts-updated' || e.type === 'posts-updated') {
     loadContacts();
   } else if (e.type === 'warn') {
     addLog(`WARN: ${e.message}`);
@@ -1062,6 +1418,8 @@ document.getElementById('refreshToggle').addEventListener('change', async (e) =>
         maxProxiesPerPost: document.getElementById('maxProxiesPerPost').value,
         replyWaitMs: (Number(document.getElementById('replyWait').value) || 25) * 1000,
         pageTimeoutMs: Math.max(0, Number(document.getElementById('pageTimeout').value) || 0) * 1000,
+        scope: currentScope(), // this device's filtered list
+        deviceId: DEVICE_ID,
       });
     }
     const r = await fetch(`/api/refresh/${on ? 'start' : 'stop'}`, opts);
