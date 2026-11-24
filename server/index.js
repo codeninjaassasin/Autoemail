@@ -11,6 +11,7 @@ const microsoftOauth = require('./oauth/microsoft');
 const { createDrafts } = require('./drafts/createDrafts');
 const scraper = require('./scraper');
 const refresher = require('./scraper/refresher');
+const postScrape = require('./scraper/postScrape');
 const contacts = require('./contacts');
 const proxies = require('./proxies');
 const settings = require('./settings');
@@ -87,8 +88,8 @@ app.post('/api/admin/sessions/sign-out-admins', (req, res) => {
 });
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
-
 app.get('/favicon.ico', (req, res) => res.redirect(301, '/favicon.svg'));
+
 // Pending OAuth states, in memory. Restarting the server mid-login invalidates them.
 const pendingStates = new Map();
 function newState(provider) {
@@ -253,7 +254,20 @@ app.put('/api/settings', saveSettings);
 app.post('/api/settings', saveSettings);
 
 // --- Tracer / status ---
-app.get('/api/status', (req, res) => res.json({ ...scraper.snapshot(), refresh: refresher.snapshot() }));
+app.get('/api/status', (req, res) =>
+  res.json({ ...scraper.snapshot(), refresh: refresher.snapshot(), postScrapes: postScrape.snapshot() })
+);
+
+// --- Scrape one post now (▶ on a row not scraped yet): a temporary worker
+// that uses only usable proxies. Independent of the main run and the refresh.
+app.post('/api/scrape/post', (req, res) => {
+  const r = postScrape.start((req.body || {}).url, broadcast);
+  if (r.error) return res.status(r.status || 400).json({ ok: false, error: r.error });
+  res.json({ ok: true });
+});
+app.post('/api/scrape/post/stop', (req, res) => {
+  res.json({ ok: postScrape.stop((req.body || {}).url) });
+});
 
 // --- Relay refresh for unsent contacts (separate from the scrape run) ---
 app.post('/api/refresh/start', (req, res) => {

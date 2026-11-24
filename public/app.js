@@ -445,8 +445,9 @@ async function pollStatus() {
     document.getElementById('t-status').textContent = s.running ? 'running' : 'idle';
     document.getElementById('tracer').classList.toggle('running', !!s.running);
     if (typeof setRunButtons === 'function') setRunButtons(!!s.running);
-    if ((s.running || s.refresh.running) && typeof attachEvents === 'function') attachEvents();
+    if ((s.running || s.refresh.running || (s.postScrapes && s.postScrapes.active)) && typeof attachEvents === 'function') attachEvents();
     renderRefresh(s.refresh);
+    applyPostScrapes(s.postScrapes);
     // topbar live strip
     const strip = document.getElementById('livestrip');
     strip.classList.toggle('running', !!s.running);
@@ -733,7 +734,13 @@ function rowHtml(r) {
   // Rows are addressed by id (contacts) or url (listed posts not scraped yet).
   const key = r.id ? `data-id="${r.id}"` : `data-url="${esc(r.url)}"`;
   const sentCell = `<input type="checkbox" class="sent-cb" ${key} ${r.sent ? 'checked' : ''} aria-label="Mark sent"/>`;
-  const checked = r.unscraped ? '<span class="posted-none">Not scraped</span>' : fmtChecked(r);
+  const job = r.unscraped ? postJobs.get(r.url) : null;
+  const checked = !r.unscraped
+    ? fmtChecked(r)
+    : job
+      ? `<span class="post-scraping">Scraping… ${job.tried} ${job.tried === 1 ? 'proxy' : 'proxies'}</span>`
+      : '<span class="posted-none">Not scraped</span>';
+  const play = r.unscraped && !r.sent ? playButton(r.url, job) : '';
   const flagLabel = r.flagged ? 'Clear the red mark' : 'Mark this row red';
   const del = `<button class="del-row${r.flagged ? ' on' : ''}" ${key} data-flagged="${r.flagged ? 1 : 0}" title="${flagLabel}" aria-label="${flagLabel}" aria-pressed="${r.flagged ? 'true' : 'false'}">✕</button>`;
   const note = r.unscraped ? '' : `${r.captchaBlocked ? 'captcha ' : ''}${r.manual ? 'filled by hand ' : ''}${r.note || ''}`;
@@ -748,7 +755,7 @@ function rowHtml(r) {
       <td>${phones}</td>
       <td>${others.map(esc).join('<br>')}</td>
       <td><span class="note-clamp">${esc(note.trim())}</span></td>
-      <td>${del}</td></tr>`;
+      <td><span class="row-actions">${play}${del}</span></td></tr>`;
 }
 
 let currentFiltered = [];
@@ -827,6 +834,7 @@ tbody.addEventListener('click', async (e) => {
   if (t.classList.contains('more-btn')) return showMoreRows();
   if (t.classList.contains('phone-copy')) return copyPhone(t);
   if (t.classList.contains('pencil')) return openManualEditor(t);
+  if (t.classList.contains('post-scrape')) return togglePostScrape(t);
   if (t.classList.contains('relay-copy')) {
     try {
       await navigator.clipboard.writeText(t.dataset.copy);
@@ -1184,6 +1192,75 @@ function viewRows() {
   return viewMemo.list;
 }
 
+// --- ▶ Scrape one post now: a temporary server worker using usable proxies ---
+const postJobs = new Map(); // url -> running job (from /api/status, all devices)
+const myPostJobs = new Set(); // urls started on this device: toast their result
+let postJobsKey = '';
+const PLAY_ICON = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M5 3.2v9.6L12.6 8z" fill="currentColor"/></svg>';
+const STOP_ICON = '<svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2" fill="currentColor"/></svg>';
+function playButton(url, job) {
+  const label = job ? 'Stop scraping this post' : 'Scrape this post now (usable proxies only)';
+  return `<button type="button" class="post-scrape${job ? ' busy' : ''}" data-url="${esc(url)}" title="${label}" aria-label="${label}">${job ? STOP_ICON : PLAY_ICON}</button>`;
+}
+function postTitle(url) {
+  const r = viewRows().find((x) => x.url === url);
+  return (r && r.title) || url;
+}
+const POST_OUTCOMES = {
+  scraped: ['Scraped', 'ok'],
+  partial: ['Scraped · no relay', 'ok'],
+  gone: ['Listing gone', 'bad'],
+  duplicate: ['Duplicate · not stored', 'bad'],
+  failed: ['Not scraped', 'bad'],
+  skipped: ['Skipped', 'ok'],
+  stopped: ['Stopped', 'ok'],
+};
+function applyPostScrapes(ps) {
+  if (!ps) return;
+  const running = ps.jobs.filter((j) => !j.finishedAt);
+  for (const j of ps.jobs) {
+    if (!j.finishedAt || !myPostJobs.has(j.url)) continue;
+    myPostJobs.delete(j.url);
+    const [kicker, tone] = POST_OUTCOMES[j.outcome] || [j.outcome, 'ok'];
+    showToast({ kicker, title: postTitle(j.url), body: j.message, tone });
+    loadContacts();
+  }
+  postJobs.clear();
+  for (const j of running) postJobs.set(j.url, j);
+  const key = running.map((j) => `${j.url}:${j.tried}`).join('|');
+  if (key !== postJobsKey) {
+    postJobsKey = key;
+    renderRows();
+  }
+}
+async function togglePostScrape(btn) {
+  const url = btn.dataset.url;
+  const busy = postJobs.has(url);
+  btn.disabled = true;
+  const res = await fetch(busy ? '/api/scrape/post/stop' : '/api/scrape/post', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  }).catch(() => null);
+  const data = res ? await res.json().catch(() => ({})) : {};
+  if (!res || !res.ok || !data.ok) {
+    btn.disabled = false;
+    if (!busy) showToast({ kicker: 'Not started', title: postTitle(url), body: data.error || 'The server did not answer.', tone: 'bad' });
+    return;
+  }
+  if (busy) {
+    postJobs.delete(url);
+    myPostJobs.delete(url); // no toast for a stop the user asked for
+  } else {
+    postJobs.set(url, { url, tried: 0 });
+    myPostJobs.add(url);
+    attachEvents();
+  }
+  postJobsKey = '';
+  renderRows();
+  pollStatus();
+}
+
 // Pencil icon: fill a relay email or phone by hand.
 const PENCIL_ICON =
   '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M11.2 2.3l2.5 2.5-7.9 7.9-3.1.6.6-3.1z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
@@ -1358,6 +1435,9 @@ function handleEvent(e) {
       expired: 'expired',
     };
     addLog(`refresh: ${words[e.outcome]}: ${e.url}`);
+  } else if (e.type === 'post-scrape') {
+    if (e.phase === 'start') addLog(`▶ scraping one post: ${e.url}`);
+    else addLog(`▶ ${e.outcome}${e.tried ? ` (${e.tried} proxies)` : ''}: ${e.message} ${e.url}`);
   } else if (e.type !== 'collected') {
     addLog(JSON.stringify(e));
   }

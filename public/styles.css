@@ -631,3 +631,20 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
   background: var(--surface); color: var(--ink-2); border: 1px solid var(--line);
 }
 .signout:hover { background: var(--surface-2); }
+
+/* ▶ Scrape one post now (rows not scraped yet) */
+.row-actions { display: inline-flex; align-items: center; gap: 6px; }
+.post-scrape {
+  display: inline-grid; place-items: center;
+  width: 24px; height: 24px; padding: 0;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--signal); cursor: pointer;
+}
+.post-scrape:hover { background: var(--signal); color: var(--signal-ink); border-color: var(--signal); }
+.post-scrape:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.post-scrape:disabled { opacity: 0.5; cursor: progress; }
+.post-scrape.busy { color: var(--live); border-color: var(--live); background: var(--live-weak); animation: post-scrape-pulse 1.4s ease-in-out infinite; }
+.post-scrape.busy:hover { background: var(--bad); color: #fff; border-color: var(--bad); animation: none; }
+.post-scraping { color: var(--live); font-size: 12px; white-space: nowrap; }
+@keyframes post-scrape-pulse { 50% { box-shadow: 0 0 0 3px var(--live-weak); } }
+@media (prefers-reduced-motion: reduce) { .post-scrape.busy { animation: none; } }
