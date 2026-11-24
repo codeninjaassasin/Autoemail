@@ -730,15 +730,15 @@ function rowHtml(r) {
         )
         .join('')
     : pencilCell(r, 'phone');
-  const sentCell = r.unscraped
-    ? '<input type="checkbox" disabled title="Fill a relay email or phone first" aria-label="Mark sent (fill a contact first)"/>'
-    : `<input type="checkbox" class="sent-cb" data-id="${r.id}" ${r.sent ? 'checked' : ''} aria-label="Mark sent"/>`;
+  // Rows are addressed by id (contacts) or url (listed posts not scraped yet).
+  const key = r.id ? `data-id="${r.id}"` : `data-url="${esc(r.url)}"`;
+  const sentCell = `<input type="checkbox" class="sent-cb" ${key} ${r.sent ? 'checked' : ''} aria-label="Mark sent"/>`;
   const checked = r.unscraped ? '<span class="posted-none">Not scraped</span>' : fmtChecked(r);
-  const del = r.unscraped
-    ? ''
-    : `<button class="del-row" data-id="${r.id}" title="Delete record" aria-label="Delete record">✕</button>`;
+  const flagLabel = r.flagged ? 'Clear the red mark' : 'Mark this row red';
+  const del = `<button class="del-row${r.flagged ? ' on' : ''}" ${key} data-flagged="${r.flagged ? 1 : 0}" title="${flagLabel}" aria-label="${flagLabel}" aria-pressed="${r.flagged ? 'true' : 'false'}">✕</button>`;
   const note = r.unscraped ? '' : `${r.captchaBlocked ? 'captcha ' : ''}${r.manual ? 'filled by hand ' : ''}${r.note || ''}`;
-  return `<tr${r.unscraped ? ' class="row-unscraped"' : ''}>
+  const cls = [r.unscraped ? 'row-unscraped' : '', r.flagged ? 'row-flagged' : ''].filter(Boolean).join(' ');
+  return `<tr${cls ? ` class="${cls}"` : ''}>
       <td>${sentCell}</td>
       <td><span class="loc-name">${esc(loc.name)}</span><span class="loc-sub">${esc(r.area || '')} / ${esc(r.category || '')}</span></td>
       <td>${fmtPosted(r.postedAt)}</td>
@@ -843,31 +843,41 @@ tbody.addEventListener('click', async (e) => {
     return;
   }
   if (t.classList.contains('del-row')) {
-    const res = await fetch(`/api/contacts/${t.dataset.id}`, { method: 'DELETE' });
-    if (!res.ok) return;
-    rows = rows.filter((r) => r.id !== t.dataset.id);
-    dataChanged();
+    // ✕ toggles a red mark on the row (the record is kept).
+    const on = t.dataset.flagged !== '1';
+    await saveFlags(t.dataset, { flagged: on }, 'Red mark');
   }
 });
-tbody.addEventListener('change', async (e) => {
+// Save the sent box / red mark of a row: a contact by id, or a listed post
+// that isn't scraped yet by url (the server makes it a contact). Contacts
+// update at once and are undone if the server refuses.
+async function saveFlags({ id, url }, flags, what) {
+  const row = id ? rows.find((r) => r.id === id) : null;
+  const before = row ? Object.fromEntries(Object.keys(flags).map((k) => [k, row[k]])) : null;
+  if (row) {
+    Object.assign(row, flags);
+    dataChanged();
+  }
+  const res = await fetch(id ? `/api/contacts/${id}` : '/api/posts/flags', {
+    method: id ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(id ? flags : { url, ...flags }),
+  }).catch(() => null);
+  const data = res && res.ok ? await res.json().catch(() => null) : null;
+  if (!data || !data.row) {
+    if (row) {
+      Object.assign(row, before);
+      dataChanged();
+    } else renderRows(); // puts an unscraped row's box back
+    showToast({ kicker: 'Not saved', title: what, body: 'The server did not accept the change.', tone: 'bad' });
+    return;
+  }
+  applyContactRows([data.row]);
+}
+tbody.addEventListener('change', (e) => {
   const cb = e.target;
   if (!cb.classList || !cb.classList.contains('sent-cb')) return;
-  const row = rows.find((r) => r.id === cb.dataset.id);
-  if (row) row.sent = cb.checked; // optimistic: the list updates at once
-  dataChanged();
-  const res = await fetch(`/api/contacts/${cb.dataset.id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sent: cb.checked }),
-  }).catch(() => null);
-  if (!res || !res.ok) {
-    if (row) row.sent = !cb.checked; // undo
-    dataChanged();
-    showToast({ kicker: 'Not saved', title: 'Sent flag', body: 'The server did not accept the change.', tone: 'bad' });
-  } else {
-    const data = await res.json().catch(() => null);
-    if (data && data.row) applyContactRows([data.row]);
-  }
+  saveFlags(cb.dataset, { sent: cb.checked }, 'Sent flag');
 });
 // Posted date: "Sep 15" (+ year if not this year), age underneath, full time on hover.
 function fmtPosted(iso) {

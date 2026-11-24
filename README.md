@@ -69,10 +69,20 @@ Then add that exact string to the provider's authorized redirect URIs. Match on 
 
 **Missing env vars warning at startup** — `.env` is missing, misnamed, or has blank values. See Setup above.
 
+## Access and /admin
+
+The app at `/` is open to everyone on your network — no password. Each browser gets its own member session (a cookie), so you can see who is using it. Only `/admin` is password-protected: sign in at `/admin/login` with the admin password from `.env`:
+
+```
+ADMIN_PASSWORD='...'
+```
+
+Wrap the value in single quotes if it contains `#` or spaces. `/admin` lists every member and admin session (device, IP, first seen, last active). **Block** turns a member browser's access off until you unblock it (it sees an "access turned off" page); **Remove** forgets a session; admin sessions can be signed out. A blocked browser that clears its cookies comes back as a new member, so blocking is a speed bump, not real security. Sessions live in `data/sessions.json`, which stores only a hash of each token. After 8 wrong admin passwords from one IP, that IP must wait 10 minutes.
+
 ## Notes
 
 - Connected account tokens are stored in plaintext in `data/accounts.json` (gitignored). Treat that file as a credential.
-- The server binds to all network interfaces and has no authentication, so anyone on your local network can reach it and use your connected accounts. Don't run it on untrusted networks.
+- The server binds to all network interfaces and the app needs no password, so anyone on your network can use it (and your connected mail accounts). Only `/admin` is password-protected, over plain HTTP. Don't run it on untrusted networks.
 - The page loads the Quill editor from `cdn.jsdelivr.net`. Apart from that, and calls to Google/Microsoft's own APIs, nothing leaves your machine.
 - The scraper opens a visible browser window (set `HEADLESS=1` to suppress it) and processes listings sequentially inside a single HTTP request, capped at 25 per area. Expect a couple of minutes per area.
 - Contacts come from two places: addresses and phone numbers the poster typed into the ad text, and the per-listing relay address (`…@job.craigslist.org`) read from Craigslist's own reply panel. Relay addresses route through Craigslist and expire.

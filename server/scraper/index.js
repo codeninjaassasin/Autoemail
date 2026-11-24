@@ -154,7 +154,8 @@ function nextItem(ctx) {
   return ctx.newQueue.shift() || ctx.queue.shift() || null;
 }
 function requeue(ctx, item) {
-  if (item.isNew && !contacts.findByUrl(item.url)) ctx.newQueue.push(item);
+  const row = item.isNew ? contacts.findByUrl(item.url) : null;
+  if (item.isNew && (!row || row.unscraped)) ctx.newQueue.push(item);
   else ctx.queue.push(item);
 }
 function updateQueueState(ctx) {
@@ -422,8 +423,10 @@ async function runForever(params, onEvent = () => {}) {
                 ctx.pending.add(url);
                 const firstSighting = !ctx.everListed.has(url);
                 ctx.everListed.add(url);
-                const item = { url, area, category, attempts: 0, isNew: !row };
-                if (!row) {
+                // A row marked sent/red before its first scrape is still a new post.
+                const isNew = !row || !!row.unscraped;
+                const item = { url, area, category, attempts: 0, isNew };
+                if (isNew) {
                   addedNew++;
                   // The search page lists newest first, so keep page order.
                   if (firstSighting && state.cycles > 1) justListed.push(item);

@@ -105,7 +105,7 @@ function scopeFilter() {
 // Unsent, not expired, and shown in the list — the posts refresh may work on.
 function inScopeRows() {
   const shown = scopeFilter();
-  return contacts.list().filter((r) => !r.sent && r.url && r.refreshStatus !== 'expired' && shown(r));
+  return contacts.list().filter((r) => !r.sent && !r.unscraped && r.url && r.refreshStatus !== 'expired' && shown(r));
 }
 
 function pickNext(busy) {
@@ -113,7 +113,7 @@ function pickNext(busy) {
   let best = null;
   const shown = scopeFilter();
   for (const r of contacts.list()) {
-    if (r.sent || !r.url || r.refreshStatus === 'expired' || busy.has(r.url)) continue;
+    if (r.sent || r.unscraped || !r.url || r.refreshStatus === 'expired' || busy.has(r.url)) continue;
     if (!shown(r)) continue;
     if (r.checkedAt && now - Date.parse(r.checkedAt) < MIN_RECHECK_MS) continue;
     if (!best || comesBefore(r, best)) best = r;
@@ -479,7 +479,7 @@ function snapshot() {
     const c = { fresh: 0, unverified: 0, expired: 0, unchecked: 0, relayChanges: 0 };
     for (const r of contacts.list()) {
       c.relayChanges += r.relayChanges || 0;
-      if (r.sent) continue;
+      if (r.sent || r.unscraped) continue;
       if (r.refreshStatus && c[r.refreshStatus] !== undefined) c[r.refreshStatus]++;
       else c.unchecked++;
     }

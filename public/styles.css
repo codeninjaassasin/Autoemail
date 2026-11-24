@@ -432,6 +432,10 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
   font-size: 12px;
 }
 .del-row:hover { background: var(--bad); color: #fff; border-color: var(--bad); }
+.del-row.on { background: var(--bad); color: #fff; border-color: var(--bad); }
+.del-row.on:hover { background: var(--surface); color: var(--bad); }
+.results-table tr.row-flagged td { background: color-mix(in srgb, var(--bad) 16%, var(--surface)); }
+.results-table tr.row-flagged:hover td { background: color-mix(in srgb, var(--bad) 22%, var(--surface)); }
 .results-table td:nth-child(7) { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; white-space: nowrap; } /* phones */
 .phone-line { display: flex; align-items: center; gap: 6px; }
 .phone-line + .phone-line { margin-top: 4px; }
@@ -620,3 +624,10 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) {
   .livestrip.running .dot { animation: none; }
 }
+
+.signout {
+  flex: none; text-decoration: none; display: inline-block;
+  padding: 5px 11px; font-size: 12px; font-weight: 500; border-radius: 6px;
+  background: var(--surface); color: var(--ink-2); border: 1px solid var(--line);
+}
+.signout:hover { background: var(--surface-2); }

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sessions · autoemail admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #eef1f4; --surface: #ffffff; --surface-2: #f5f7f9; --ink: #10151a; --muted: #5b6772;
+        --line: #d9dfe5; --signal: #0f7c80; --signal-ink: #ffffff; --bad: #c1453b; --ok: #2f7d4f;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1418; --surface: #161d22; --surface-2: #1c252b; --ink: #e6ecf0; --muted: #94a3ae;
+          --line: #2a353d; --signal: #2fb3b8; --signal-ink: #08201f; --bad: #e2675c; --ok: #52b67f;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 'IBM Plex Sans', system-ui, sans-serif; }
+      header {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 24px;
+        background: var(--surface); border-bottom: 1px solid var(--line);
+      }
+      .mark { width: 14px; height: 14px; border-radius: 4px; background: var(--signal); }
+      .wordmark { font-weight: 700; font-size: 17px; }
+      .tag { color: var(--muted); font-size: 13px; }
+      .spacer { flex: 1; }
+      a.btn, button {
+        display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 8px;
+        border: 1px solid var(--line); background: var(--surface-2); color: var(--ink);
+        font: 500 13px 'IBM Plex Sans', sans-serif; text-decoration: none; cursor: pointer;
+      }
+      button.danger { border-color: color-mix(in srgb, var(--bad) 50%, var(--line)); color: var(--bad); }
+      button.danger:hover { background: color-mix(in srgb, var(--bad) 10%, var(--surface-2)); }
+      main { padding: 20px 24px 40px; max-width: 1400px; margin: 0 auto; }
+      .bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+      h1 { font-size: 20px; margin: 0; }
+      .count { color: var(--muted); }
+      .wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; min-width: 760px; }
+      th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); background: var(--surface-2); }
+      tr:last-child td { border-bottom: 0; }
+      .role { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+      .role.admin { background: color-mix(in srgb, var(--signal) 15%, transparent); color: var(--signal); }
+      .role.user { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
+      .you { margin-left: 6px; font-size: 12px; color: var(--ok); font-weight: 600; }
+      .mono { font-family: 'IBM Plex Mono', monospace; font-size: 13px; }
+      .dim { color: var(--muted); font-size: 12px; display: block; }
+      .empty { padding: 30px; text-align: center; color: var(--muted); }
+      .msg { min-height: 20px; color: var(--muted); margin-top: 10px; }
+      .note { color: var(--muted); font-size: 13px; max-width: 760px; }
+      .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+      .badge-blocked { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
+        color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 45%, var(--line)); }
+      tr.is-blocked td { background: color-mix(in srgb, var(--bad) 6%, transparent); }
+      @media (max-width: 600px) { header, main { padding-left: 16px; padding-right: 16px; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="mark" aria-hidden="true"></span><span class="wordmark">autoemail</span><span class="tag">admin</span>
+      <span class="spacer"></span>
+      <a class="btn" href="/">Open the app</a>
+      <button id="logout" type="button">Sign out</button>
+    </header>
+    <main>
+      <div class="bar">
+        <h1>Sessions</h1>
+        <span class="count" id="count"></span>
+        <span class="spacer"></span>
+        <button class="danger" id="revokeOthers" type="button">Sign out other admins</button>
+      </div>
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr><th>Who</th><th>Device</th><th>IP</th><th>First seen</th><th>Last active</th><th></th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="empty" id="empty" hidden>No sessions.</div>
+      </div>
+      <div class="msg" id="msg" role="status"></div>
+      <p class="note">Members use the app without a password; every browser gets its own session. <b>Block</b> turns a browser's access off until you unblock it (a browser that clears its cookies comes back as a new member). <b>Remove</b> only forgets the session.</p>
+    </main>
+    <script>
+      (function () {
+        var rowsEl = document.getElementById('rows');
+        var msg = document.getElementById('msg');
+        function esc(s) {
+          return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+          });
+        }
+        function device(ua) {
+          ua = ua || '';
+          var os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS X/.test(ua) ? 'macOS'
+            : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'Unknown OS';
+          var br = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome'
+            : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+          return br + ' on ' + os;
+        }
+        function ago(iso) {
+          var m = Math.floor((Date.now() - Date.parse(iso)) / 60000);
+          if (m < 1) return 'just now';
+          if (m < 60) return m + 'm ago';
+          if (m < 1440) return Math.floor(m / 60) + 'h ago';
+          var d = Math.floor(m / 1440);
+          return d === 1 ? '1 day ago' : d + ' days ago';
+        }
+        function api(method, url, body) {
+          return fetch(url, {
+            method: method,
+            headers: body ? { 'Content-Type': 'application/json' } : {},
+            body: body ? JSON.stringify(body) : undefined,
+          }).then(function (r) {
+            if (r.status === 401) location.href = '/admin/login?next=/admin';
+            return r.json();
+          });
+        }
+        function load() {
+          api('GET', '/api/admin/sessions').then(function (d) {
+            var list = d.sessions || [];
+            var members = list.filter(function (s) { return s.role === 'member'; });
+            var blocked = members.filter(function (s) { return s.blocked; }).length;
+            document.getElementById('count').textContent =
+              members.length + ' member' + (members.length === 1 ? '' : 's') + (blocked ? ' (' + blocked + ' blocked)' : '') +
+              ' · ' + (list.length - members.length) + ' admin';
+            document.getElementById('empty').hidden = list.length > 0;
+            rowsEl.innerHTML = list
+              .map(function (s) {
+                var isAdmin = s.role === 'admin';
+                var acts = isAdmin
+                  ? '<button class="danger act" data-act="remove" data-id="' + esc(s.id) + '" type="button">' + (s.current ? 'Sign out' : 'Sign out') + '</button>'
+                  : (s.blocked
+                      ? '<button class="act" data-act="unblock" data-id="' + esc(s.id) + '" type="button">Unblock</button>'
+                      : '<button class="danger act" data-act="block" data-id="' + esc(s.id) + '" type="button">Block</button>') +
+                    '<button class="act" data-act="remove" data-id="' + esc(s.id) + '" type="button">Remove</button>';
+                return (
+                  '<tr' + (s.blocked ? ' class="is-blocked"' : '') + '><td><span class="role ' + (isAdmin ? 'admin' : 'user') + '">' + (isAdmin ? 'admin' : 'member') + '</span>' +
+                  (s.current ? '<span class="you">you</span>' : '') + (s.blocked ? '<span class="badge-blocked">blocked</span>' : '') + '</td>' +
+                  '<td>' + esc(device(s.userAgent)) + '<span class="dim" title="' + esc(s.userAgent) + '">' + esc(String(s.userAgent || '').slice(0, 70)) + '</span></td>' +
+                  '<td class="mono">' + esc(s.ip) + '</td>' +
+                  '<td>' + esc(new Date(s.createdAt).toLocaleString()) + '</td>' +
+                  '<td>' + esc(ago(s.lastSeenAt)) + '<span class="dim">' + esc(new Date(s.lastSeenAt).toLocaleString()) + '</span></td>' +
+                  '<td><div class="acts">' + acts + '</div></td></tr>'
+                );
+              })
+              .join('');
+          });
+        }
+        rowsEl.addEventListener('click', function (e) {
+          var b = e.target.closest('.act');
+          if (!b) return;
+          var id = encodeURIComponent(b.dataset.id);
+          var act = b.dataset.act;
+          var req = act === 'remove'
+            ? api('DELETE', '/api/admin/sessions/' + id)
+            : api('POST', '/api/admin/sessions/' + id + '/block', { blocked: act === 'block' });
+          req.then(function (d) {
+            msg.textContent = !d.ok ? d.error || 'Could not change the session.'
+              : act === 'block' ? 'Blocked. That browser can no longer use the app.'
+              : act === 'unblock' ? 'Unblocked.' : 'Session removed.';
+            load();
+          });
+        });
+        document.getElementById('revokeOthers').addEventListener('click', function () {
+          if (!confirm('Sign out every other admin session?')) return;
+          api('POST', '/api/admin/sessions/sign-out-admins', {}).then(function (d) {
+            msg.textContent = 'Signed out ' + (d.removed || 0) + ' admin session(s).';
+            load();
+          });
+        });
+        document.getElementById('logout').addEventListener('click', function () {
+          fetch('/admin/logout', { method: 'POST' }).then(function () { location.href = '/'; });
+        });
+        load();
+        setInterval(load, 10000);
+      })();
+    </script>
+  </body>
+</html>

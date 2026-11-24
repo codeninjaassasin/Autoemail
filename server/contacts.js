@@ -188,6 +188,7 @@ function upsert(row, source = 'scrape') {
     }
     const prev = rows[idx];
     const merged = { ...prev, ...patch, id: prev.id, sent: prev.sent };
+    delete merged.unscraped; // kept for a post marked sent/red before it was scraped
     // Phones and emails accumulate; a replaced relay leaves the email list.
     const newRelay = isRelay(row.relay) ? row.relay : null;
     merged.phones = [...new Set([...(prev.phones || []), ...(row.phones || [])])];
@@ -217,6 +218,31 @@ function upsert(row, source = 'scrape') {
   return added;
 }
 
+// A contact row for a listed post that hasn't been scraped yet (`post` gives
+// its title/area/category/date). Contact fields start empty.
+function addFromPost(url, post = {}, extra = {}) {
+  const row = {
+    id: crypto.randomUUID(),
+    sent: false,
+    scrapedAt: new Date().toISOString(),
+    url,
+    title: post.title || '',
+    emails: [],
+    phones: [],
+    relay: null,
+    captchaBlocked: false,
+    note: '',
+    area: post.area || '',
+    category: post.category || '',
+    postedAt: post.postedAt || null, // the listed post's date (filled by server/postDates.js)
+    ...extra,
+  };
+  load().push(row);
+  byUrl.set(row.url, row);
+  byId.set(row.id, row);
+  return row;
+}
+
 // Manual entry from the list's pencil icon: a relay email and/or one phone.
 // Creates the contact when the post hasn't been scraped yet (`post` gives its
 // title/area/category). Returns { row } or { error }.
@@ -228,32 +254,18 @@ function setManual(url, { relay, phone }, post = {}) {
     return { error: 'That phone number is already on another contact.' };
   }
   const now = new Date().toISOString();
-  if (!row) {
-    row = {
-      id: crypto.randomUUID(),
-      sent: false,
-      scrapedAt: now,
-      url,
-      title: post.title || '',
-      emails: [],
-      phones: [],
-      relay: null,
-      captchaBlocked: false,
-      note: '',
-      area: post.area || '',
-      category: post.category || '',
-      manual: true,
-    };
-    rows.push(row);
-    byUrl.set(row.url, row);
-    byId.set(row.id, row);
-  }
+  if (!row) row = addFromPost(url, post, { manual: true });
   if (relay) {
     row.relay = relay;
     row.emails = [...new Set([...(row.emails || []), relay])];
   }
   if (phone) row.phones = [...new Set([...(row.phones || []), phone])];
+  if (!row.postedAt && post.postedAt) row.postedAt = post.postedAt;
   row.manualAt = now;
+  if (row.unscraped) {
+    delete row.unscraped;
+    row.manual = true;
+  }
   touch(row);
   save();
   return { row };
@@ -310,14 +322,37 @@ function markAlive(url) {
   if (row && !row.sent) row.aliveCheckedAt = new Date().toISOString();
 }
 
-function setSent(id, sent) {
+// Sent box and red mark (the ✕ button) of a contact. `flags` holds `sent`
+// and/or `flagged`; a missing key is left as it is.
+function setFlags(id, flags = {}) {
   load();
   const row = byId.get(id);
   if (!row) return null;
-  row.sent = !!sent;
+  if (flags.sent !== undefined) row.sent = !!flags.sent;
+  if (flags.flagged !== undefined) {
+    if (flags.flagged) {
+      row.flagged = true;
+      row.flaggedAt = new Date().toISOString();
+    } else {
+      delete row.flagged;
+      delete row.flaggedAt;
+    }
+  }
   touch(row);
   save();
   return row;
+}
+function setSent(id, sent) {
+  return setFlags(id, { sent });
+}
+
+// Same, by post url: a listed post that isn't a contact yet becomes one
+// (empty contact fields) so its sent box / red mark can be kept.
+function setFlagsByUrl(url, flags, post) {
+  load();
+  // `unscraped` stays until the scraper (or a hand fill) gives it a contact.
+  const row = byUrl.get(url) || (post ? addFromPost(url, post, { unscraped: true }) : null);
+  return row ? setFlags(row.id, flags) : null;
 }
 
 function remove(id) {
@@ -373,6 +408,8 @@ module.exports = {
   list,
   upsert,
   setSent,
+  setFlags,
+  setFlagsByUrl,
   remove,
   reload,
   count,

@@ -20,6 +20,72 @@ const categories = require('./data/categories');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+
+// --- Login: nothing on this port is served without a session ----------------
+const fs = require('fs');
+const auth = require('./auth');
+const VIEWS = path.join(__dirname, 'views');
+const LOGIN_TEXT = {
+  TITLE: 'Admin sign in',
+  TAG: 'admin',
+  HEADING: 'Admin sign in',
+  SUB: 'Enter the admin password to manage sessions.',
+  DEFAULT_NEXT: '/admin',
+  ALT: '<a href="/">Back to the app</a>',
+};
+function renderView(file, vars) {
+  let html = fs.readFileSync(path.join(VIEWS, file), 'utf8');
+  for (const [k, v] of Object.entries(vars)) html = html.split(`{{${k}}}`).join(v);
+  return html;
+}
+// Only same-site paths may be used as the after-login destination.
+function safeNext(next, fallback) {
+  const n = String(next || '');
+  return n.startsWith('/') && !n.startsWith('//') && !n.startsWith('/\\') ? n : fallback;
+}
+// The app is open to everyone (each browser gets a member session); only
+// /admin needs the admin password. See server/auth.js.
+app.use(auth.guard);
+app.get('/admin/login', (req, res) => {
+  if (auth.adminOf(req)) return res.redirect(302, safeNext(req.query.next, LOGIN_TEXT.DEFAULT_NEXT));
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(renderView('login.html', LOGIN_TEXT));
+});
+app.post('/admin/login', (req, res) => {
+  const b = req.body || {};
+  const out = auth.login(req, res, String(b.password || ''));
+  if (!out.ok) return res.status(out.status).json({ ok: false, error: out.error });
+  res.json({ ok: true, next: safeNext(b.next, LOGIN_TEXT.DEFAULT_NEXT) });
+});
+// Old links from the removed app login.
+app.get('/login', (req, res) => res.redirect(302, '/'));
+app.post('/admin/logout', (req, res) => {
+  auth.logout(req, res);
+  res.json({ ok: true });
+});
+
+// --- /admin: session management (admin only; enforced by auth.guard) ---
+app.get('/admin', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(VIEWS, 'admin.html'));
+});
+app.get('/api/admin/sessions', (req, res) => {
+  const me = req.admin.id;
+  res.json({ ok: true, sessions: auth.list().map((s) => ({ ...s, current: s.id === me })) });
+});
+app.delete('/api/admin/sessions/:id', (req, res) => {
+  if (!auth.remove(req.params.id)) return res.status(404).json({ ok: false, error: 'Session not found.' });
+  res.json({ ok: true });
+});
+app.post('/api/admin/sessions/:id/block', (req, res) => {
+  const blocked = (req.body || {}).blocked !== false;
+  if (!auth.setBlocked(req.params.id, blocked)) return res.status(404).json({ ok: false, error: 'Member session not found.' });
+  res.json({ ok: true, blocked });
+});
+app.post('/api/admin/sessions/sign-out-admins', (req, res) => {
+  res.json({ ok: true, removed: auth.signOutOtherAdmins(req.admin.id) });
+});
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Pending OAuth states, in memory. Restarting the server mid-login invalidates them.
@@ -120,9 +186,25 @@ app.post('/api/contacts/reload', (req, res) => {
   contacts.reload(); // re-read data/contacts.json (pages resync: new epoch)
   res.json({ ok: true, count: contacts.count() });
 });
+// Body: { sent?, flagged? } (sent box, red mark).
+const pickFlags = (b = {}) => {
+  const f = {};
+  if (b.sent !== undefined) f.sent = !!b.sent;
+  if (b.flagged !== undefined) f.flagged = !!b.flagged;
+  return f;
+};
 app.patch('/api/contacts/:id', (req, res) => {
-  const row = contacts.setSent(req.params.id, req.body.sent);
+  const row = contacts.setFlags(req.params.id, pickFlags(req.body));
   if (!row) return res.status(404).json({ ok: false, error: 'not found' });
+  res.json({ ok: true, row });
+});
+// Same for a listed post that isn't a contact yet: { url, sent?, flagged? }.
+app.post('/api/posts/flags', (req, res) => {
+  const url = String((req.body || {}).url || '');
+  const flags = pickFlags(req.body);
+  if (!Object.keys(flags).length) return res.status(400).json({ ok: false, error: 'Nothing to change.' });
+  const row = contacts.setFlagsByUrl(url, flags, posts.find(url));
+  if (!row) return res.status(404).json({ ok: false, error: 'Unknown post.' });
   res.json({ ok: true, row });
 });
 // Listed posts whose contact hasn't been scraped yet (the All list shows them
@@ -425,3 +507,21 @@ app.listen(config.port, () => {
 });
 // Background: posted dates for listed posts not scraped yet (All list sorting).
 require('./postDates').start(broadcast);
+// Repair: a contact without a posted date takes it from its listed post, if
+// known (contacts filled by hand used to be saved without one).
+{
+  let fixed = 0;
+  for (const r of contacts.list()) {
+    if (r.postedAt) continue;
+    const p = posts.find(r.url);
+    if (p && p.postedAt) {
+      r.postedAt = p.postedAt;
+      contacts.touch(r);
+      fixed++;
+    }
+  }
+  if (fixed) {
+    contacts.persist();
+    console.log(`Filled the posted date of ${fixed} contact(s) from listed posts.`);
+  }
+}

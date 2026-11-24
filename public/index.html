@@ -31,6 +31,7 @@
           <span class="live-item"><b id="bar-stored">0</b> stored</span>
           <span class="live-item"><b id="bar-ram">–</b> rss</span>
         </div>
+        <a class="ghost sm signout" href="/admin" title="Session management (admin password)">Admin</a>
       </header>
 
       <!-- NAV RAIL -->
@@ -237,6 +238,21 @@
     <div id="toasts" class="toasts" aria-live="polite"></div>
     <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
     <script>
+      // Blocked by the admin: any API call answering 403 reloads the page,
+      // which then shows the "access turned off" notice.
+      (function () {
+        var orig = window.fetch.bind(window);
+        var leaving = false;
+        window.fetch = function () {
+          return orig.apply(null, arguments).then(function (r) {
+            if (r.status === 403 && !leaving) {
+              leaving = true;
+              location.reload();
+            }
+            return r;
+          });
+        };
+      })();
       // Load the shared settings (stored on the server, same for every device)
       // before the app starts, so it opens with them already in place.
       (function () {
