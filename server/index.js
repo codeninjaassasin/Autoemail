@@ -11,6 +11,7 @@ const microsoftOauth = require('./oauth/microsoft');
 const { createDrafts } = require('./drafts/createDrafts');
 const scraper = require('./scraper');
 const refresher = require('./scraper/refresher');
+const rush = require('./scraper/rush');
 const contacts = require('./contacts');
 const proxies = require('./proxies');
 const settings = require('./settings');
@@ -252,7 +253,17 @@ app.put('/api/settings', saveSettings);
 app.post('/api/settings', saveSettings);
 
 // --- Tracer / status ---
-app.get('/api/status', (req, res) => res.json({ ...scraper.snapshot(), refresh: refresher.snapshot() }));
+app.get('/api/status', (req, res) => res.json({ ...scraper.snapshot(), refresh: refresher.snapshot(), rush: rush.snapshot() }));
+
+// --- Scrape now (👊 on a row): rush one post with several proxies ---
+app.post('/api/rush', (req, res) => {
+  const out = rush.start((req.body || {}).url, broadcast);
+  if (out.error) return res.status(out.status || 400).json({ ok: false, error: out.error });
+  res.json({ ok: true, job: out.job });
+});
+app.post('/api/rush/stop', (req, res) => {
+  res.json({ ok: rush.stop((req.body || {}).url) });
+});
 
 // --- Relay refresh for unsent contacts (separate from the scrape run) ---
 app.post('/api/refresh/start', (req, res) => {

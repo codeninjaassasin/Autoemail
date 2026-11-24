@@ -36,6 +36,12 @@ function makeBroker(cooldownMs) {
     relaxProxy(server) {
       relax.push({ server, readyAt: Date.now() + cooldownMs });
     },
+    // Return a proxy that is still good (its holder is done with it) to the
+    // front of the queue.
+    giveBack(server) {
+      known.add(server);
+      fresh.unshift(server);
+    },
     // Lease the next proxy to try: a relax-ready one first, else a fresh one.
     lease() {
       const now = Date.now();

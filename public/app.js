@@ -447,6 +447,7 @@ async function pollStatus() {
     if (typeof setRunButtons === 'function') setRunButtons(!!s.running);
     if ((s.running || s.refresh.running) && typeof attachEvents === 'function') attachEvents();
     renderRefresh(s.refresh);
+    renderRush(s.rush);
     // topbar live strip
     const strip = document.getElementById('livestrip');
     strip.classList.toggle('running', !!s.running);
@@ -538,7 +539,7 @@ function currentScope() {
 }
 let refreshOwner = null; // DEVICE_ID that owns the running refresh, from /api/status
 let lastRefreshScope = null; // server's scope while refresh runs
-let localScopeCount = 0; // unsent, not-expired posts in this device's list
+let localScopeCount = 0; // unsent, not-red, not-expired posts in this device's list
 function renderScope() {
   const el = document.getElementById('r-scope');
   if (!el) return;
@@ -735,9 +736,16 @@ function rowHtml(r) {
   const sentCell = `<input type="checkbox" class="sent-cb" ${key} ${r.sent ? 'checked' : ''} aria-label="Mark sent"/>`;
   const checked = r.unscraped ? '<span class="posted-none">Not scraped</span>' : fmtChecked(r);
   const flagLabel = r.flagged ? 'Clear the red mark' : 'Mark this row red';
-  const del = `<button class="del-row${r.flagged ? ' on' : ''}" ${key} data-flagged="${r.flagged ? 1 : 0}" title="${flagLabel}" aria-label="${flagLabel}" aria-pressed="${r.flagged ? 'true' : 'false'}">✕</button>`;
+  const rushing = rushJobs.get(r.url);
+  const rushLabel = rushing ? 'Stop scraping this post' : 'Scrape this post now';
+  // 👊 Scrape now: not for sent posts (sent is final).
+  const rushBtn = r.sent
+    ? ''
+    : `<button class="rush-btn${rushing ? ' on' : ''}" data-url="${esc(r.url)}" title="${rushLabel}" aria-label="${rushLabel}" aria-pressed="${rushing ? 'true' : 'false'}">👊</button>`;
+  const del = `<span class="row-acts">${rushBtn}<button class="del-row${r.flagged ? ' on' : ''}" ${key} data-flagged="${r.flagged ? 1 : 0}" title="${flagLabel}" aria-label="${flagLabel}" aria-pressed="${r.flagged ? 'true' : 'false'}">✕</button></span>`;
   const note = r.unscraped ? '' : `${r.captchaBlocked ? 'captcha ' : ''}${r.manual ? 'filled by hand ' : ''}${r.note || ''}`;
-  const cls = [r.unscraped ? 'row-unscraped' : '', r.flagged ? 'row-flagged' : ''].filter(Boolean).join(' ');
+  // Green while 👊 works on the post (over the red mark, which comes back after).
+  const cls = [r.unscraped ? 'row-unscraped' : '', r.flagged ? 'row-flagged' : '', rushing ? 'row-rushing' : ''].filter(Boolean).join(' ');
   return `<tr${cls ? ` class="${cls}"` : ''}>
       <td>${sentCell}</td>
       <td><span class="loc-name">${esc(loc.name)}</span><span class="loc-sub">${esc(r.area || '')} / ${esc(r.category || '')}</span></td>
@@ -776,7 +784,7 @@ function paintRows() {
     renderLimit = PAGE_ROWS;
   }
   // What relay refresh would check if this device turned it on now.
-  localScopeCount = filtered.filter((r) => !r.unscraped && !r.sent && r.url && r.refreshStatus !== 'expired').length;
+  localScopeCount = filtered.filter((r) => !r.unscraped && !r.sent && !r.flagged && r.url && r.refreshStatus !== 'expired').length;
   renderScope();
   const shown = filtered.slice(0, renderLimit);
   const more = filtered.length - shown.length;
@@ -842,12 +850,142 @@ tbody.addEventListener('click', async (e) => {
     }
     return;
   }
+  if (t.classList.contains('rush-btn')) return toggleRush(t.dataset.url);
   if (t.classList.contains('del-row')) {
     // ✕ toggles a red mark on the row (the record is kept).
     const on = t.dataset.flagged !== '1';
     await saveFlags(t.dataset, { flagged: on }, 'Red mark');
   }
 });
+// 👊 Scrape now: the server works on one post with several proxies at once
+// until its relay (or another contact) is caught. Click again to stop.
+const rushJobs = new Map(); // url -> job, from /api/status
+let rushKey = '';
+const rushSeen = new Set(); // finished job ids already shown
+const pageOpenedAt = Date.now();
+async function toggleRush(url) {
+  const running = rushJobs.has(url);
+  const res = await fetch(running ? '/api/rush/stop' : '/api/rush', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  }).catch(() => null);
+  const data = res ? await res.json().catch(() => null) : null;
+  if (!res || !res.ok || !data || !data.ok) {
+    if (!running) showToast({ kicker: 'Not started', title: 'Scrape now', body: (data && data.error) || 'The server did not answer.', tone: 'bad' });
+    return;
+  }
+  if (running) rushJobs.delete(url);
+  else rushJobs.set(url, data.job);
+  rushKey = [...rushJobs.keys()].sort().join('|');
+  renderRows();
+}
+// Hover popup on a green row: live status of the 👊 job.
+const rushTip = document.createElement('div');
+rushTip.className = 'rush-tip';
+rushTip.setAttribute('role', 'tooltip');
+rushTip.hidden = true;
+document.body.appendChild(rushTip);
+let rushTipUrl = null;
+function rushTipText(j) {
+  const failed = (j.failed || 0) + (j.gated || 0);
+  const secs = Math.max(0, Math.round((Date.now() - j.startedAt) / 1000));
+  const took = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
+  if (!j.tried && j.lastError) {
+    return `<b>Can't start the browser</b><span class="rush-tip-sub">${esc(j.lastError)} · ${took}</span>`;
+  }
+  if (!j.tried) return `<b>Working on it now…</b><span>Waiting for proxies · ${took}</span>`;
+  return (
+    `<b>Working on it now…</b>` +
+    `<span>${j.tried} ${j.tried === 1 ? 'proxy was' : 'proxies were'} tried, ${failed} ${failed === 1 ? 'proxy' : 'proxies'} failed</span>` +
+    `<span class="rush-tip-sub">${j.gated || 0} hit the captcha, ${j.failed || 0} didn't connect · ${took}</span>`
+  );
+}
+function paintRushTip() {
+  if (!rushTipUrl) return;
+  const j = rushJobs.get(rushTipUrl);
+  if (!j) {
+    rushTip.hidden = true;
+    rushTipUrl = null;
+    return;
+  }
+  rushTip.innerHTML = rushTipText(j);
+}
+function placeRushTip(e) {
+  const pad = 14;
+  const w = rushTip.offsetWidth;
+  const h = rushTip.offsetHeight;
+  // Top-right of the cursor; flips left / below only at the window edges.
+  let x = e.clientX + pad;
+  let y = e.clientY - h - pad;
+  if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+  if (y < 8) y = e.clientY + pad;
+  rushTip.style.left = Math.max(8, x) + 'px';
+  rushTip.style.top = Math.max(8, y) + 'px';
+}
+tbody.addEventListener('mousemove', (e) => {
+  const tr = e.target.closest('tr.row-rushing');
+  const btn = tr && tr.querySelector('.rush-btn');
+  const url = btn ? btn.dataset.url : null;
+  if (!url || !rushJobs.has(url)) {
+    if (rushTipUrl) {
+      rushTip.hidden = true;
+      rushTipUrl = null;
+    }
+    return;
+  }
+  if (url !== rushTipUrl) {
+    rushTipUrl = url;
+    rushTip.hidden = false;
+    paintRushTip();
+  }
+  placeRushTip(e);
+});
+tbody.addEventListener('mouseleave', () => {
+  rushTip.hidden = true;
+  rushTipUrl = null;
+});
+setInterval(paintRushTip, 1000); // keeps the elapsed time ticking
+
+const RUSH_WORDS = {
+  relay: 'Relay caught',
+  phone: 'Phone only (no email offered)',
+  'no-reply': 'The post has no reply option',
+  gone: 'The post is gone',
+  duplicate: 'Its phone is already on another contact',
+  sent: 'Stopped: marked sent',
+  stopped: 'Stopped',
+  'gave-up': 'Gave up',
+  error: 'Failed',
+};
+function renderRush(r) {
+  if (!r) return;
+  rushJobs.clear();
+  for (const j of r.jobs || []) rushJobs.set(j.url, j);
+  const key = [...rushJobs.keys()].sort().join('|');
+  if (key !== rushKey) {
+    rushKey = key;
+    renderRows();
+  }
+  paintRushTip();
+  let fresh = false;
+  for (const x of r.recent || []) {
+    if (rushSeen.has(x.id)) continue;
+    rushSeen.add(x.id);
+    if (x.finishedAt < pageOpenedAt || x.outcome === 'stopped') continue;
+    fresh = true;
+    const got = x.relay ? x.relay : (x.phones || []).length ? fmtPhone(x.phones[0]) : '';
+    const good = x.outcome === 'relay' || x.outcome === 'phone';
+    showToast({
+      kicker: 'Scrape now',
+      title: RUSH_WORDS[x.outcome] || x.outcome,
+      body: `${got ? got + ' · ' : ''}${x.tried} proxies, ${Math.round(x.ms / 1000)}s · ${x.url.replace(/^https?:\/\//, '')}`,
+      tone: good ? 'ok' : 'bad',
+    });
+  }
+  if (fresh) syncList();
+}
+
 // Save the sent box / red mark of a row: a contact by id, or a listed post
 // that isn't scraped yet by url (the server makes it a contact). Contacts
 // update at once and are undone if the server refuses.
@@ -1328,7 +1466,7 @@ function handleEvent(e) {
   } else if (e.type === 'proxies-fetched') {
     addLog(`proxies fetched: ${e.count} (stored ${e.stats.stored})`);
   } else if (e.type === 'proxies-auto-refresh') {
-    addLog(`↻ proxy pool auto-refreshed (${e.reason}): kept ${e.kept} verified, removed ${e.removed} unverified, gathered ${e.found}`);
+    addLog(`↻ proxy pool auto-refreshed (${e.reason}): kept ${e.kept} verified, removed ${e.removed} unverified, gathered ${e.found}${e.archivesRemoved ? `; deleted ${e.archivesRemoved} archived pool file(s) older than 1 day (${e.archiveMbFreed} MB)` : ''}`);
   } else if (e.type === 'parked') {
     addLog(`parked (tried ${e.tried} proxies): ${e.url}`);
   } else if (e.type === 'cycle-done') {
@@ -1358,6 +1496,10 @@ function handleEvent(e) {
       expired: 'expired',
     };
     addLog(`refresh: ${words[e.outcome]}: ${e.url}`);
+  } else if (e.type === 'rush-started') {
+    addLog(`scrape now: started with ${e.lanes} proxies at once: ${e.url}`);
+  } else if (e.type === 'rush-result') {
+    addLog(`scrape now: ${e.outcome}${e.relay ? ' ' + e.relay : ''} (${e.tried} proxies, ${Math.round(e.ms / 1000)}s): ${e.url}`);
   } else if (e.type !== 'collected') {
     addLog(JSON.stringify(e));
   }

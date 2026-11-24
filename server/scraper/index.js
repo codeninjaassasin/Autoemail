@@ -1,6 +1,6 @@
 'use strict';
 
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./launch');
 const config = require('../config');
 const contacts = require('../contacts');
 const proxies = require('../proxies');
@@ -20,6 +20,7 @@ const PRIORITY_SEED_MS = 30000; // how often verified proxies are pushed to the 
 const AUTO_REFRESH_MS = 60 * 60 * 1000; // rebuild the proxy pool every hour of a run...
 const AUTO_REFRESH_MIN_VERIFIED = 100; // ...or sooner when fewer verified proxies are usable
 const AUTO_REFRESH_MIN_GAP_MS = 15 * 60 * 1000; // but never more often than this
+const ARCHIVE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // auto refresh deletes archived pools older than this
 
 const state = {
   running: false,
@@ -87,7 +88,7 @@ function sleep(ms) {
 
 async function preflightBrowser(headless = config.headless) {
   try {
-    const b = await chromium.launch({ headless });
+    const b = await launchBrowser({ headless });
     await b.close();
   } catch (err) {
     if (/Executable doesn'?t exist|browserType\.launch/i.test(err.message)) {
@@ -113,13 +114,15 @@ async function proxyProducer(ctx, myToken) {
         lastAuto = Date.now();
         const reason = sinceAuto >= AUTO_REFRESH_MS ? 'hourly' : `only ${verified} verified proxies left`;
         const r = await refreshPool('keep-verified');
+        // Archived pools older than a day are no longer needed.
+        const old = proxies.removeOldArchives(ARCHIVE_MAX_AGE_MS);
         ctx.broker.reset();
         ctx.broker.addPriority(proxies.usable().map((p) => p.server));
         ctx.broker.addFresh(r.found.map((p) => p.server));
         lastSeed = Date.now();
         state.autoRefreshes++;
         state.lastAutoRefreshAt = lastAuto;
-        emit({ type: 'proxies-auto-refresh', reason, kept: r.pruned.kept, removed: r.pruned.removed, found: r.found.length, stats: r.stats });
+        emit({ type: 'proxies-auto-refresh', reason, kept: r.pruned.kept, removed: r.pruned.removed, found: r.found.length, stats: r.stats, archivesRemoved: old.removed, archiveMbFreed: Math.round(old.freedBytes / 1048576) });
       }
       // Verified proxies (proven by earlier use) go to the front of the queue.
       // The broker skips servers it already knows, so this adds only new ones.
@@ -353,7 +356,7 @@ async function runForever(params, onEvent = () => {}) {
   try {
     emit({ type: 'preflight' });
     await preflightBrowser(headless);
-    browser = await chromium.launch({ headless });
+    browser = await launchBrowser({ headless });
     activeBrowser = browser;
     emit({ type: 'run-started', areas, categories, concurrency, loop, useProxies, headless, maxProxiesPerPost, solver: state.solver });
 

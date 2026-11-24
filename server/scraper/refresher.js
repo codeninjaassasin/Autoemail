@@ -13,7 +13,7 @@
 // whichever post was checked longest ago. A separate HTTP sweep marks dead
 // listings Expired so the browser workers never spend proxies on them.
 
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./launch');
 const config = require('../config');
 const contacts = require('../contacts');
 const proxies = require('../proxies');
@@ -105,7 +105,7 @@ function scopeFilter() {
 // Unsent, not expired, and shown in the list — the posts refresh may work on.
 function inScopeRows() {
   const shown = scopeFilter();
-  return contacts.list().filter((r) => !r.sent && !r.unscraped && r.url && r.refreshStatus !== 'expired' && shown(r));
+  return contacts.list().filter((r) => !r.sent && !r.flagged && !r.unscraped && r.url && r.refreshStatus !== 'expired' && shown(r));
 }
 
 function pickNext(busy) {
@@ -113,7 +113,7 @@ function pickNext(busy) {
   let best = null;
   const shown = scopeFilter();
   for (const r of contacts.list()) {
-    if (r.sent || r.unscraped || !r.url || r.refreshStatus === 'expired' || busy.has(r.url)) continue;
+    if (r.sent || r.flagged || r.unscraped || !r.url || r.refreshStatus === 'expired' || busy.has(r.url)) continue;
     if (!shown(r)) continue;
     if (r.checkedAt && now - Date.parse(r.checkedAt) < MIN_RECHECK_MS) continue;
     if (!best || comesBefore(r, best)) best = r;
@@ -164,7 +164,7 @@ async function proxySupply(ctx) {
 async function liveBrowser(ctx) {
   if (ctx.browser && ctx.browser.isConnected()) return ctx.browser;
   if (!ctx.launching) {
-    ctx.launching = chromium.launch({ headless: ctx.headless }).finally(() => {
+    ctx.launching = launchBrowser({ headless: ctx.headless }).finally(() => {
       ctx.launching = null;
     });
   }
@@ -210,7 +210,7 @@ async function refreshOne(ctx, hold, url) {
   let sameProxyVisits = 0;
   while (!ctx.stopped) {
     const stored = contacts.findByUrl(url);
-    if (!stored || stored.sent) return; // deleted or marked sent meanwhile
+    if (!stored || stored.sent || stored.flagged) return; // deleted, marked sent or red meanwhile
 
     if (tried.size >= ctx.maxProxiesPerPost) {
       const row = contacts.setCheckStatus(url, 'unverified');
@@ -246,7 +246,7 @@ async function refreshOne(ctx, hold, url) {
     }
     if (ctx.stopped) return; // Stop closed the browser; that says nothing about the proxy
     const current = contacts.findByUrl(url);
-    if (!current || current.sent) return; // deleted or marked sent during the visit
+    if (!current || current.sent || current.flagged) return; // deleted, marked sent or red during the visit
 
     const proxy = hold.proxy;
     const note = scraped.note || '';
@@ -371,8 +371,8 @@ async function sweepOnce(ctx) {
       }
       const url = todo[i++];
       const row = contacts.findByUrl(url);
-      if (!row || row.sent || !scopeFilter()(row)) {
-        s.done++; // left the list (filter changed, sent or deleted) — skip it
+      if (!row || row.sent || row.flagged || !scopeFilter()(row)) {
+        s.done++; // left the list (filter changed, sent, red or deleted) — skip it
         continue;
       }
       try {
@@ -479,7 +479,7 @@ function snapshot() {
     const c = { fresh: 0, unverified: 0, expired: 0, unchecked: 0, relayChanges: 0 };
     for (const r of contacts.list()) {
       c.relayChanges += r.relayChanges || 0;
-      if (r.sent || r.unscraped) continue;
+      if (r.sent || r.flagged || r.unscraped) continue; // sent and red rows get no freshness checks
       if (r.refreshStatus && c[r.refreshStatus] !== undefined) c[r.refreshStatus]++;
       else c.unchecked++;
     }
@@ -487,7 +487,7 @@ function snapshot() {
   }
   const c = countsMemo.c;
   const b = run ? run.broker.sizes() : { fresh: 0, relax: 0 };
-  // scope: unsent, not-expired posts in the filtered list (what refresh works on).
+  // scope: unsent, not-red, not-expired posts in the filtered list (what refresh works on).
   const scopeInfo = { count: countsMemo.scopeCount, filtered: !isUnfiltered(scope.prefs), owner: scope.owner };
   return { ...state, sweep: { ...state.sweep }, counts: c, scope: scopeInfo, proxyFresh: b.fresh, proxyRelax: b.relax };
 }
