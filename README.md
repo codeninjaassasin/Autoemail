@@ -55,6 +55,29 @@ npm run dev
 
 Open `http://localhost:<PORT>` (the startup log prints the exact URL), connect your accounts, and fill in the form. Recipients accept one address per line or comma-separated. Each recipient gets its own draft with the same subject/body, distributed round-robin across the checked accounts.
 
+## Run as a service and auto-deploy (VM)
+
+On the VM the app runs as a systemd **user** service, `deploy/autoemail.service`, installed at `~/.config/systemd/user/autoemail.service`. It starts at boot (linger is on for the user), restarts on a crash, and after every start resumes a scrape with the settings saved from the UI (`scripts/start-scrape.js`).
+
+```
+node scripts/start-scrape.js --status   # is the server up, is a scrape running?
+node scripts/start-scrape.js            # start a scrape only if none is running
+systemctl --user restart autoemail      # restart server + scrape
+journalctl --user -u autoemail -f       # live logs
+```
+
+**CI/CD.** `.github/workflows/deploy.yml` runs on every push to `main`: a syntax/load check on GitHub's machines, then a deploy job on a self-hosted runner on the VM that fast-forwards `/opt/autoemail` to `origin/main`, runs `npm ci` only when the lockfile changed, restarts the service and checks it came back. The VM is on a private network, so GitHub can't reach it; the runner on the VM polls GitHub instead.
+
+One-time setup (needs a repo **admin**): GitHub → repo **Settings → Actions → Runners → New self-hosted runner**, copy the token after `--token`, then on the VM:
+
+```
+scripts/install-runner.sh <token>
+```
+
+The deploy refuses to run (and says why) when `/opt/autoemail` is not on `main` or has uncommitted changes to tracked files, so edits made directly on the VM are never overwritten. Develop on a branch elsewhere, or commit and push from the VM before merging.
+
+The repo is public: under **Settings → Actions → General → Fork pull request workflows**, choose **Require approval for all external contributors**, so a fork's pull request can never run code on the VM's runner.
+
 ## Troubleshooting
 
 **`Error 400: redirect_uri_mismatch`** — the redirect URI registered with the provider doesn't exactly match what the app sends. The app derives it from `PORT`, so changing `PORT` after registering will break OAuth. Print what the app is actually sending:
@@ -93,6 +116,6 @@ Wrap the value in single quotes if it contains `#` or spaces. `/admin` lists eve
 - The results list has four tabs. **All** lists every post the scrape has seen on a search page in the last 3 days, scraped or not (stored in `data/posts.json`; a background HTTP pass fills their posted dates and drops expired ones). **Scraped** lists only posts with a stored contact. **Unsent** is All minus sent. **Sent** lists contacts marked sent. A missing relay email or phone shows a pencil icon: click it to fill the field by hand (saved as a contact marked "filled by hand"; phones are validated and must not already belong to another contact).
 - The scrape serves new posts first: a post not in the contact list yet always goes ahead of posts already stored, and a post first listed after the run's first scan goes to the very front. Stored posts are re-visited (relay update) only when no new post is waiting.
 - While a scrape runs with the proxy pool, the pool is refreshed automatically every hour, or after 15 minutes when fewer than 100 verified proxies are usable: verified proxies are kept, unverified ones removed, and a fresh list gathered.
+- **▶ Scrape this post** (on rows not scraped yet) starts a temporary worker on the server for that one post. It uses only **usable** proxies (verified by earlier use, not cooling down), best first, with the main scrape's proxy rules: a proxy that reaches the page is kept for up to 3 visits, a captcha cools it, a network error counts toward its 10-failure drop. It stops when the relay is caught, the listing is gone, or the usable proxies / "Max proxies / post" run out; anything found on the way (ad-text phone, email) is stored. Up to 5 run at once, independent of the main scrape and the refresh; the Checked column shows progress and clicking ■ stops it. Reply wait and page timeout come from the saved run settings.
 - A contact marked sent is final: neither the refresh nor the main scrape visits or updates it again, and the Checked column shows "—" for it.
 - Microsoft Graph has no draft-only permission scope; `Mail.ReadWrite` (the narrowest available) also grants broader mailbox access. Gmail's `gmail.compose` scope is narrower and covers drafts only.
-- **▶ Scrape this post** (on rows not scraped yet) starts a temporary worker on the server for that one post. It uses only **usable** proxies (verified by earlier use, not cooling down), best first, with the main scrape's proxy rules: a proxy that reaches the page is kept for up to 3 visits, a captcha cools it, a network error counts toward its 10-failure drop. It stops when the relay is caught, the listing is gone, or the usable proxies / "Max proxies / post" run out; anything found on the way (ad-text phone, email) is stored. Up to 5 run at once, independent of the main scrape and the refresh; the Checked column shows progress and clicking ■ stops it. Reply wait and page timeout come from the saved run settings.
