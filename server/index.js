@@ -88,6 +88,7 @@ app.post('/api/admin/sessions/sign-out-admins', (req, res) => {
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+app.get('/favicon.ico', (req, res) => res.redirect(301, '/favicon.svg'));
 // Pending OAuth states, in memory. Restarting the server mid-login invalidates them.
 const pendingStates = new Map();
 function newState(provider) {
