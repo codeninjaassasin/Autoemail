@@ -539,7 +539,7 @@ function currentScope() {
 }
 let refreshOwner = null; // DEVICE_ID that owns the running refresh, from /api/status
 let lastRefreshScope = null; // server's scope while refresh runs
-let localScopeCount = 0; // unsent, not-expired posts in this device's list
+let localScopeCount = 0; // unsent, not-red, not-expired posts in this device's list
 function renderScope() {
   const el = document.getElementById('r-scope');
   if (!el) return;
@@ -783,7 +783,7 @@ function paintRows() {
     renderLimit = PAGE_ROWS;
   }
   // What relay refresh would check if this device turned it on now.
-  localScopeCount = filtered.filter((r) => !r.unscraped && !r.sent && r.url && r.refreshStatus !== 'expired').length;
+  localScopeCount = filtered.filter((r) => !r.unscraped && !r.sent && !r.flagged && r.url && r.refreshStatus !== 'expired').length;
   renderScope();
   const shown = filtered.slice(0, renderLimit);
   const more = filtered.length - shown.length;
@@ -1405,7 +1405,7 @@ function handleEvent(e) {
   } else if (e.type === 'proxies-fetched') {
     addLog(`proxies fetched: ${e.count} (stored ${e.stats.stored})`);
   } else if (e.type === 'proxies-auto-refresh') {
-    addLog(`↻ proxy pool auto-refreshed (${e.reason}): kept ${e.kept} verified, removed ${e.removed} unverified, gathered ${e.found}`);
+    addLog(`↻ proxy pool auto-refreshed (${e.reason}): kept ${e.kept} verified, removed ${e.removed} unverified, gathered ${e.found}${e.archivesRemoved ? `; deleted ${e.archivesRemoved} archived pool file(s) older than 1 day (${e.archiveMbFreed} MB)` : ''}`);
   } else if (e.type === 'parked') {
     addLog(`parked (tried ${e.tried} proxies): ${e.url}`);
   } else if (e.type === 'cycle-done') {

@@ -13,7 +13,7 @@
 // usable proxies / the per-post budget. Independent of the main scrape and the
 // relay refresh; all jobs share one browser, closed when the last one ends.
 
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./launch');
 const config = require('../config');
 const contacts = require('../contacts');
 const posts = require('../posts');
@@ -54,7 +54,7 @@ function params() {
 async function liveBrowser(headless) {
   if (browser && browser.isConnected()) return browser;
   if (!launching) {
-    launching = chromium.launch({ headless }).finally(() => {
+    launching = launchBrowser({ headless }).finally(() => {
       launching = null;
     });
   }

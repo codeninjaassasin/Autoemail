@@ -307,7 +307,7 @@ function findByUrl(url) {
 // confirmed time, so an unverified row still shows how old its relay is.
 function setCheckStatus(url, status, { save: saveNow = true } = {}) {
   const row = findByUrl(url);
-  if (!row || row.sent) return null; // sent contacts get no freshness checks
+  if (!row || row.sent || row.flagged) return null; // sent and red rows get no freshness checks
   row.checkedAt = new Date().toISOString();
   row.refreshStatus = status;
   touch(row);
@@ -319,7 +319,7 @@ function setCheckStatus(url, status, { save: saveNow = true } = {}) {
 // The listing answered the HTTP sweep. Saved in batches by the caller.
 function markAlive(url) {
   const row = findByUrl(url);
-  if (row && !row.sent) row.aliveCheckedAt = new Date().toISOString();
+  if (row && !row.sent && !row.flagged) row.aliveCheckedAt = new Date().toISOString();
 }
 
 // Sent box and red mark (the ✕ button) of a contact. `flags` holds `sent`

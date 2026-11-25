@@ -95,6 +95,35 @@ function pruneUnverified() {
   return { kept: store.proxies.length, removed: before - store.proxies.length };
 }
 
+// Delete archived pools (data/proxies.<stamp>.json, made by pruneUnverified and
+// rebuild) older than maxAgeMs. proxies.json itself is never touched. Returns
+// { removed, freedBytes }.
+const ARCHIVE_RE = /^proxies\.\d{4}-\d{2}-\d{2}T[\d-]+Z\.json$/;
+function removeOldArchives(maxAgeMs = 24 * 60 * 60 * 1000) {
+  let removed = 0;
+  let freedBytes = 0;
+  let names = [];
+  try {
+    names = fs.readdirSync(DATA_DIR).filter((n) => ARCHIVE_RE.test(n));
+  } catch {
+    return { removed, freedBytes };
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const name of names) {
+    const file = path.join(DATA_DIR, name);
+    try {
+      const st = fs.statSync(file);
+      if (st.mtimeMs >= cutoff) continue;
+      fs.unlinkSync(file);
+      removed++;
+      freedBytes += st.size;
+    } catch {
+      /* best effort */
+    }
+  }
+  return { removed, freedBytes };
+}
+
 // Merge proxies. Accepts {server,proto,elite} objects or bare "host:port" /
 // "proto://host:port" strings. Returns how many were newly added.
 function addProxies(list) {
@@ -246,6 +275,7 @@ module.exports = {
   flush,
   rebuild,
   pruneUnverified,
+  removeOldArchives,
   addProxies,
   setLive,
   markSuccess,

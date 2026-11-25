@@ -197,6 +197,8 @@ async function workPost(context, url, opts = {}) {
         }
         await page.waitForTimeout(700);
       }
+    } else {
+      row.noReply = true; // the post has no reply button (no relay to catch)
     }
 
     // Optional solver path (only if configured) to crack the gate for the relay.
