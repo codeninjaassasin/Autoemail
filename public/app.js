@@ -25,9 +25,9 @@ async function loadAccounts() {
   }
   for (const a of list) {
     const li = document.createElement('li');
-    li.innerHTML = `<input type="checkbox" value="${a.id}" checked />
-      <span class="provider">${a.provider}</span><span>${a.emailAddress}</span>
-      <a href="#" class="del" data-id="${a.id}">remove</a>`;
+    li.innerHTML = `<input type="checkbox" value="${esc(a.id)}" checked aria-label="Use ${esc(a.emailAddress)}" />
+      <span class="provider">${a.provider === 'google' ? 'Gmail' : 'Outlook'}</span><span class="acct-email">${esc(a.emailAddress)}</span>
+      <a href="#" class="del" data-id="${esc(a.id)}">remove</a>`;
     ul.appendChild(li);
   }
   ul.querySelectorAll('.del').forEach((el) =>
@@ -35,11 +35,141 @@ async function loadAccounts() {
       e.preventDefault();
       await fetch(`/api/accounts/${el.dataset.id}`, { method: 'DELETE' });
       loadAccounts();
+      loadReminders();
     })
   );
 }
 loadAccounts();
 
+// Connecting needs the provider's OAuth client in .env, and the OAuth reply
+// comes back to the redirect address (localhost), so say so before the click.
+(async () => {
+  let s;
+  try {
+    s = await (await fetch('/api/connect/status')).json();
+  } catch {
+    return;
+  }
+  const note = document.getElementById('connectNote');
+  const lines = [];
+  const missing = [];
+  for (const [key, id, name] of [['google', 'connectGoogle', 'Gmail'], ['microsoft', 'connectMicrosoft', 'Outlook']]) {
+    const link = document.getElementById(id);
+    if (!s[key].configured) {
+      link.removeAttribute('href');
+      link.setAttribute('aria-disabled', 'true');
+      link.title = `${name} sign-in is not set up on this server yet.`;
+      missing.push(name);
+    }
+  }
+  if (missing.length === 2)
+    lines.push("Gmail and Outlook sign-in aren't set up on this server yet: add their client IDs and secrets to .env, then restart.");
+  else if (missing.length)
+    lines.push(`${missing[0]} sign-in isn't set up on this server yet: add its client ID and secret to .env, then restart.`);
+  const redirect = s.google.configured ? s.google.redirectUri : s.microsoft.configured ? s.microsoft.redirectUri : null;
+  if (redirect) {
+    const back = new URL(redirect);
+    if (back.host !== location.host)
+      lines.push(`Sign-in returns to ${back.origin}. Open this page at that address (on the server, or through an SSH tunnel) before connecting.`);
+  }
+  note.textContent = lines.join(' ');
+  note.hidden = !lines.length;
+})();
+
+// ---------- Templates ----------
+const tplSelect = document.getElementById('tplSelect');
+const tplName = document.getElementById('tplName');
+const tplSave = document.getElementById('tplSave');
+const tplDelete = document.getElementById('tplDelete');
+const subjectEl = document.getElementById('subject');
+let templatesList = [];
+let loadedCompose = { subject: '', body: '' }; // what the editor held after the last template load
+
+const editorBody = () => (quill.getText().trim() ? quill.root.innerHTML : '');
+const composeDirty = () =>
+  (subjectEl.value || editorBody()) && (subjectEl.value !== loadedCompose.subject || editorBody() !== loadedCompose.body);
+
+function syncTplButtons() {
+  const sel = tplSelect.value;
+  tplDelete.disabled = !sel;
+  tplSave.textContent = sel ? 'Save changes' : 'Save as template';
+  tplSave.title = sel ? 'Overwrite this template with the subject and body below' : 'Save the subject and body below as a new template';
+}
+
+async function loadTemplates(selectId = tplSelect.value) {
+  try {
+    templatesList = await (await fetch('/api/templates')).json();
+  } catch {
+    templatesList = [];
+  }
+  tplSelect.innerHTML =
+    '<option value="">No template</option>' +
+    templatesList.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
+  tplSelect.value = templatesList.some((t) => t.id === selectId) ? selectId : '';
+  syncTplButtons();
+}
+loadTemplates('');
+
+let tplPrev = '';
+tplSelect.addEventListener('focus', () => (tplPrev = tplSelect.value));
+tplSelect.addEventListener('change', () => {
+  const t = templatesList.find((x) => x.id === tplSelect.value);
+  if (t) {
+    if (composeDirty() && !confirm('Replace the subject and body you have written with this template?')) {
+      tplSelect.value = tplPrev;
+      return;
+    }
+    tplName.value = t.name;
+    subjectEl.value = t.subject;
+    quill.setContents([]);
+    if (t.bodyHtml) quill.clipboard.dangerouslyPasteHTML(t.bodyHtml);
+    loadedCompose = { subject: subjectEl.value, body: editorBody() };
+  } else {
+    tplName.value = ''; // keep the text: "Save as template" makes a new one from it
+  }
+  tplPrev = tplSelect.value;
+  syncTplButtons();
+});
+
+tplSave.addEventListener('click', async () => {
+  const name = tplName.value.trim();
+  if (!name) {
+    showToast({ kicker: 'Template not saved', title: 'Give the template a name', body: 'Type a name in Template name, then save.', tone: 'bad' });
+    tplName.focus();
+    return;
+  }
+  const id = tplSelect.value;
+  tplSave.disabled = true;
+  try {
+    const r = await fetch(id ? `/api/templates/${encodeURIComponent(id)}` : '/api/templates', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, subject: subjectEl.value, bodyHtml: editorBody() }),
+    });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || 'Could not save the template.');
+    await loadTemplates(data.template.id);
+    tplPrev = tplSelect.value;
+    loadedCompose = { subject: subjectEl.value, body: editorBody() };
+    showToast({ kicker: id ? 'Template updated' : 'Template saved', title: data.template.name, body: 'Pick it from Template next time.' });
+  } catch (err) {
+    showToast({ kicker: 'Template not saved', title: name, body: err.message, tone: 'bad' });
+  } finally {
+    tplSave.disabled = false;
+  }
+});
+
+tplDelete.addEventListener('click', async () => {
+  const t = templatesList.find((x) => x.id === tplSelect.value);
+  if (!t || !confirm(`Delete the template "${t.name}"? The subject and body stay in the editor.`)) return;
+  await fetch(`/api/templates/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
+  tplName.value = '';
+  await loadTemplates('');
+  tplPrev = '';
+  showToast({ kicker: 'Template deleted', title: t.name, body: 'The text below was kept.' });
+});
+
+// ---------- Create drafts (never sends) ----------
 document.getElementById('create').addEventListener('click', async () => {
   const accountIds = [...document.querySelectorAll('#accounts input:checked')].map((c) => c.value);
   const out = document.getElementById('draftResult');
@@ -51,9 +181,10 @@ document.getElementById('create').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         accountIds,
-        subject: document.getElementById('subject').value,
+        subject: subjectEl.value,
         bodyHtml: quill.root.innerHTML,
         recipients: document.getElementById('recipients').value,
+        templateId: tplSelect.value || null,
       }),
     })
   ).json();
@@ -62,7 +193,89 @@ document.getElementById('create').addEventListener('click', async () => {
         .map((r) => `${r.ok ? 'OK ' : 'ERR'} ${r.to} via ${r.account}${r.error ? ' — ' + r.error : ''}`)
         .join('\n')
     : `Error: ${data.error}`;
+  loadReminders();
 });
+
+// ---------- Draft reminders ----------
+// The server checks each mailbox's Drafts folder every 15 minutes; this lists
+// the drafts made here that are still unsent. Sending is always done by hand.
+const remindList = document.getElementById('remindList');
+const remindSub = document.getElementById('remindSub');
+const remindCheck = document.getElementById('remindCheck');
+const draftsDue = document.getElementById('draftsDue');
+let remindToastShown = false;
+
+function agoText(iso) {
+  const m = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000));
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  if (m < 1440) return `${Math.floor(m / 60)} h ago`;
+  const d = Math.floor(m / 1440);
+  return d === 1 ? '1 day ago' : `${d} days ago`;
+}
+
+function renderReminders(r) {
+  const n = r.waiting.length;
+  draftsDue.hidden = !n;
+  draftsDue.textContent = n ? String(n) : '';
+  draftsDue.closest('button').title = n ? `${n} draft${n === 1 ? '' : 's'} waiting to be sent` : '';
+
+  remindSub.textContent = r.checking
+    ? 'Checking the Drafts folders…'
+    : r.checkedAt
+      ? `Checked ${agoText(r.checkedAt)}; checks again every 15 minutes. Review, edit and send each one yourself.`
+      : 'Drafts made here stay unsent until you review and send them yourself.';
+
+  const items = r.errors.map(
+    (e) => `<li class="remind-err">
+      <span class="r-to">${esc(e.account)}</span>
+      <span class="r-meta">${esc(e.error)}</span>
+      <a class="btn btn--quiet btn--sm" href="/connect/${e.provider === 'google' ? 'google' : 'microsoft'}">Connect again</a>
+    </li>`
+  );
+  for (const d of r.waiting) {
+    const old = Date.now() - Date.parse(d.createdAt) > 86400000;
+    items.push(`<li class="${old ? 'is-old' : ''}">
+      <span class="r-to">${esc(d.to)}</span>
+      <span class="r-subj">${esc(d.subject || '(no subject)')}</span>
+      <span class="r-meta">In ${esc(d.account)}, made ${agoText(d.createdAt)}</span>
+      <a class="btn btn--quiet btn--sm" href="${esc(d.link)}" target="_blank" rel="noopener">Open in ${d.provider === 'google' ? 'Gmail' : 'Outlook'}</a>
+    </li>`);
+  }
+  remindList.innerHTML = items.length ? items.join('') : '<li class="sub">Nothing waiting. Every draft made here has been sent or deleted.</li>';
+
+  if (n && !remindToastShown) {
+    remindToastShown = true;
+    showToast({
+      kicker: 'Reminder',
+      title: `${n} draft${n === 1 ? '' : 's'} waiting to be sent`,
+      body: 'Open the Drafts tab, make each one right, and send it yourself.',
+    });
+  }
+}
+
+async function loadReminders() {
+  try {
+    renderReminders(await (await fetch('/api/reminders')).json());
+  } catch {
+    /* offline: keep the last list */
+  }
+}
+remindCheck.addEventListener('click', async () => {
+  remindCheck.disabled = true;
+  remindCheck.setAttribute('aria-busy', 'true');
+  remindSub.textContent = 'Checking the Drafts folders…';
+  try {
+    renderReminders(await (await fetch('/api/reminders/check', { method: 'POST' })).json());
+  } catch {
+    remindSub.textContent = 'The check did not go through. Try again in a minute.';
+  } finally {
+    remindCheck.disabled = false;
+    remindCheck.removeAttribute('aria-busy');
+  }
+});
+loadReminders();
+setInterval(loadReminders, 60000);
 
 // ---------- Multiselect component ----------
 function makeMultiselect(el, items, { valueKey, labelFn, allowAdd, onChange = () => {} }) {

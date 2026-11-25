@@ -7,6 +7,7 @@
 /* Hallmark · dismissed F4 · .tabs button is a text tab with an underline, never a filled button; the one fill is .btn--primary */
 /* Hallmark · dismissed F6 · the lead reading is the run state as a word (running, idle), not a figure */
 /* Hallmark · answered F7 · the six row icon controls share one recipe on purpose: they sit side by side in every ledger row and must read as one set */
+/* Hallmark · answered F7 · the six panels (telemetry, setup, ledger, accounts, waiting drafts, compose) share one surface recipe on purpose: an app screen reads as one set of tool panels on one ground */
 @import url("./tokens.css");
 @import url("./base.css");
 
@@ -338,6 +339,34 @@ a.title-clamp:hover { color: var(--color-accent); text-decoration: underline; }
 .accounts .provider { font-size: var(--text-xs); color: var(--color-cool); border: var(--rule-hair) solid var(--color-rule); border-radius: 4px; padding: 0 var(--space-2xs); background: var(--color-cool-soft); }
 .accounts .del { margin-left: auto; color: var(--color-bad); font-size: var(--text-xs); }
 .connect { margin-top: var(--space-md); display: flex; gap: var(--space-xs); flex-wrap: wrap; }
+a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: none; }
+.connect-note { margin: var(--space-sm) 0 0; font-size: var(--text-xs); line-height: 1.45; color: var(--color-muted); }
+.acct-email { min-width: 0; overflow-wrap: anywhere; }
+/* Left column: accounts, then the drafts still waiting to be sent by hand. */
+.draftside { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; }
+.remindpanel { background: var(--color-paper-2); color: var(--color-ink); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-md); }
+.remindhead { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.remindhead h2 { margin: 0; }
+.remind-sub { margin: var(--space-2xs) 0 var(--space-sm); font-size: var(--text-xs); line-height: 1.45; color: var(--color-muted); }
+.remindlist { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
+.remindlist li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-sm); row-gap: var(--space-3xs); padding: var(--space-xs) 0; border-top: var(--rule-hair) solid var(--color-rule); }
+.remindlist li.sub { display: block; color: var(--color-muted); font-size: var(--text-xs); }
+.remindlist .btn { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.r-to { font-family: var(--font-outlier); font-size: var(--text-xs); color: var(--color-ink); overflow-wrap: anywhere; }
+.r-subj { font-size: var(--text-sm); color: var(--color-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-meta { font-size: var(--text-xs); color: var(--color-muted); }
+.remindlist li.is-old .r-meta { color: var(--color-accent); }
+.remindlist li.remind-err .r-meta { color: var(--color-bad); }
+/* Template picker above the subject. */
+.tplbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: var(--space-sm); align-items: end; margin-bottom: var(--space-md); padding-bottom: var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
+.tplfield { display: block; font-size: var(--text-xs); color: var(--color-muted); }
+.tplfield > input, .tplfield > select { margin-top: var(--space-2xs); }
+.tplfield > select { cursor: pointer; }
+.tplacts { display: flex; align-items: center; gap: var(--space-xs); min-height: var(--control-h); }
+.draft-note { font-size: var(--text-xs); color: var(--color-muted); }
+/* Count of drafts waiting, on the Drafts tab. */
+.tabcount { display: inline-block; min-width: 1.6em; margin-left: var(--space-2xs); padding: 0 var(--space-2xs); border-radius: var(--radius-pill); background: var(--color-accent-soft); color: var(--color-ink); font: 500 var(--text-xs)/1.5 var(--font-outlier); text-align: center; font-variant-numeric: tabular-nums; }
+.tabcount[hidden] { display: none; }
 .composepanel > label { display: block; font-size: var(--text-xs); color: var(--color-muted); margin: 0 0 var(--space-2xs); }
 .composepanel > label:not(:first-of-type) { margin-top: var(--space-md); }
 .composepanel > label > input, .composepanel > label > textarea { margin-top: var(--space-2xs); }
@@ -380,6 +409,7 @@ a.title-clamp:hover { color: var(--color-accent); text-decoration: underline; }
   .tabs { order: 3; flex-basis: 100%; min-height: 44px; overflow-x: auto; border-top: var(--rule-hair) solid var(--color-rule); }
   .signout { order: 2; }
   .draftgrid { grid-template-columns: minmax(0, 1fr); }
+  .tplbar { grid-template-columns: minmax(0, 1fr); }
 }
 /* Small or short screens: the page scrolls instead of squeezing the ledger to nothing. */
 @media (max-width: 760px), (max-height: 720px) {
