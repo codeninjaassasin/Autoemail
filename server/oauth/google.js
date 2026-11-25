@@ -26,8 +26,11 @@ async function handleCallback(code) {
   const { tokens } = await oauth.getToken(code);
   oauth.setCredentials(tokens);
 
-  const profile = await google.oauth2({ version: 'v2', auth: oauth }).userinfo.get();
-  const emailAddress = profile.data.email;
+  // The address comes from Gmail's own profile: the gmail.compose scope allows
+  // it, while the userinfo endpoint would need an extra email scope (401).
+  const profile = await google.gmail({ version: 'v1', auth: oauth }).users.getProfile({ userId: 'me' });
+  const emailAddress = profile.data.emailAddress;
+  if (!emailAddress) throw new Error('Google did not return the account address.');
 
   return accounts.upsert({
     provider: 'google',

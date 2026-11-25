@@ -214,6 +214,23 @@
                 <ul id="remindList" class="remindlist"></ul>
               </section>
             </div>
+            <div class="draftmain">
+            <section class="autopanel" aria-labelledby="autoHead">
+              <div class="autohead">
+                <h2 id="autoHead">Automatic drafts</h2>
+                <span class="auto-state" id="autoState">Off</span>
+                <button id="autoToggle" class="btn btn--quiet btn--sm" type="button" aria-pressed="false">Turn on</button>
+              </div>
+              <p class="auto-sub">Every post scraped after you turn this on that has an email and no phone gets one draft, from the template its mailbox is assigned. Mailboxes with a template take turns. Nothing is sent: you review and send each draft yourself.</p>
+              <div class="autotablewrap">
+                <table class="autotable">
+                  <thead><tr><th scope="col">Mailbox</th><th scope="col">Template</th><th scope="col">State</th></tr></thead>
+                  <tbody id="autoRows"><tr><td colspan="3" class="sub">Connect a Gmail account to assign it a template.</td></tr></tbody>
+                </table>
+              </div>
+              <dl class="autostats" id="autoStats"></dl>
+              <p class="auto-msg" id="autoMsg" role="status"></p>
+            </section>
             <div class="composepanel">
               <h2>Compose</h2>
               <div class="tplbar">
@@ -226,15 +243,34 @@
                   <button id="tplDelete" class="btn btn--quiet btn--sm" type="button" disabled>Delete</button>
                 </div>
               </div>
+              <div class="fieldbar" id="fieldBar">
+                <span class="fieldbar-label">Fill from the post</span>
+              </div>
               <label>Subject<input id="subject" type="text" /></label>
               <label>Body</label>
               <div id="editor"></div>
-              <label>Recipients<textarea id="recipients" rows="4" placeholder="one per line or comma-separated"></textarea></label>
+              <div class="targetbar">
+                <p class="target-head">Who gets a draft</p>
+                <p class="target-sum" id="targetSum" role="status">Counting scraped posts…</p>
+                <div class="targetfields">
+                  <label class="tplfield">Posted within
+                    <select id="draftDays">
+                      <option value="1">24 hours</option>
+                      <option value="3">3 days</option>
+                      <option value="7" selected>7 days</option>
+                      <option value="30">30 days</option>
+                      <option value="0">Any time</option>
+                    </select>
+                  </label>
+                  <label class="tplfield">How many<input id="draftLimit" type="number" min="1" max="100" value="25" inputmode="numeric" /></label>
+                </div>
+              </div>
               <div class="actions">
                 <button id="create" class="btn btn--primary" type="button">Create drafts</button>
                 <span class="draft-note">Drafts only. Nothing is sent from here.</span>
               </div>
               <pre id="draftResult" class="result" hidden></pre>
+            </div>
             </div>
           </div>
         </section>

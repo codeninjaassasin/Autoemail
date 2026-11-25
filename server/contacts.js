@@ -342,6 +342,18 @@ function setFlags(id, flags = {}) {
   save();
   return row;
 }
+// Records the automatic draft made for a contact (or a failed attempt), so the
+// same post is never drafted twice. `info` null clears it.
+function setAutoDraft(id, info) {
+  load();
+  const row = byId.get(id);
+  if (!row) return null;
+  if (info) row.autoDraft = info;
+  else delete row.autoDraft;
+  touch(row);
+  save();
+  return row;
+}
 function setSent(id, sent) {
   return setFlags(id, { sent });
 }
@@ -409,6 +421,7 @@ module.exports = {
   upsert,
   setSent,
   setFlags,
+  setAutoDraft,
   setFlagsByUrl,
   remove,
   reload,

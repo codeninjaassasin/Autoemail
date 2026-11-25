@@ -8,9 +8,9 @@ const config = require('./config');
 const accounts = require('./accounts');
 const googleOauth = require('./oauth/google');
 const microsoftOauth = require('./oauth/microsoft');
-const { createDrafts } = require('./drafts/createDrafts');
 const draftLog = require('./drafts/log');
 const reminders = require('./drafts/reminders');
+const autoDrafts = require('./drafts/auto');
 const templates = require('./templates');
 const scraper = require('./scraper');
 const refresher = require('./scraper/refresher');
@@ -110,6 +110,7 @@ app.get('/api/accounts', (req, res) => res.json(accounts.list()));
 app.delete('/api/accounts/:id', (req, res) => {
   accounts.remove(req.params.id);
   draftLog.forgetAccount(req.params.id);
+  autoDrafts.forgetAccount(req.params.id);
   res.json({ ok: true });
 });
 
@@ -149,10 +150,20 @@ app.get('/oauth/microsoft/callback', async (req, res) => {
 });
 
 // --- Draft creation ---
+// Compose drafts to the scraped posts themselves: the newest posts that have an
+// email, no phone and no draft yet, each filled from its own fields. Never sends.
+app.get('/api/drafts/ready', (req, res) => {
+  const list = autoDrafts.ready(req.query.days);
+  res.json({
+    ready: list.length,
+    max: autoDrafts.COMPOSE_MAX,
+    next: list.slice(0, 5).map((r) => ({ id: r.id, title: r.title, area: r.area, postedAt: r.postedAt || null, to: autoDrafts.recipient(r) })),
+  });
+});
 app.post('/api/drafts', async (req, res) => {
   try {
-    const { accountIds, subject, bodyHtml, recipients, templateId } = req.body;
-    const results = await createDrafts({ accountIds, subject, bodyHtml, recipients, templateId });
+    const { accountIds, subject, bodyHtml, templateId, limit, days } = req.body || {};
+    const results = await autoDrafts.draftFromCompose({ accountIds, subject, bodyHtml, templateId, limit, days });
     res.json({ ok: true, results });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });
@@ -185,6 +196,16 @@ app.put('/api/templates/:id', (req, res) => {
   }
 });
 app.delete('/api/templates/:id', (req, res) => res.json({ ok: templates.remove(req.params.id) }));
+
+// --- Automatic drafts: new no-phone posts -> one draft from the mailbox's template. Never sends. ---
+app.get('/api/automation', (req, res) => res.json(autoDrafts.summary()));
+app.put('/api/automation', (req, res) => {
+  try {
+    res.json({ ok: true, ...autoDrafts.configure(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
 
 // --- Draft reminders: drafts this app made that still sit unsent. Read-only. ---
 app.get('/api/reminders', (req, res) => res.json(reminders.summary()));
@@ -438,6 +459,10 @@ app.get('/api/db-format', (req, res) => {
       record: { id: 'uuid', name: 'string (unique)', subject: 'string', bodyHtml: 'HTML string', createdAt: 'ISOString', updatedAt: 'ISOString' },
       count: templates.list().length,
     },
+    'data/automation.json': {
+      description: 'Automatic drafts: on/off, when it was switched on (only posts scraped after that are drafted), the template assigned to each mailbox, and counters. Each drafted contact gets an `autoDraft` field in contacts.json.',
+      shape: '{ enabled, enabledAt, assignments: { [accountId]: { templateId } }, cursor, drafted, failed, lastDraftAt, lastError }',
+    },
     'data/drafts.json': {
       description: 'Drafts this app created, for the reminder. The app never sends; a draft is "gone" once it leaves the Drafts folder (sent or deleted by you). Gone entries are kept 30 days.',
       shape: 'Array<DraftEntry>',
@@ -484,6 +509,7 @@ app.get('/api/db-format', (req, res) => {
         refreshStatus: '"fresh" | "unverified" | "expired" | absent (not checked yet)',
         checkedAt: 'ISOString | absent (last check, any outcome)',
         relayCheckedAt: 'ISOString | absent (last time the relay was read from the live page)',
+        autoDraft: '{ at, accountId, account, templateId, to, draftId, logId } once an automatic draft was made | { fails, error, at, to } after failed tries | absent',
         relayChangedAt: 'ISOString | absent (last time the relay was found changed)',
         relayChanges: 'number | absent (times the relay was found changed)',
         aliveCheckedAt: 'ISOString | absent (last HTTP sweep that found the listing alive)',
@@ -579,6 +605,8 @@ app.listen(config.port, () => {
 require('./postDates').start(broadcast);
 // Background: every 15 min, check which drafts this app made are still unsent.
 reminders.start();
+// Background: draft new no-phone posts from the assigned templates (when switched on).
+autoDrafts.start();
 // Repair: a contact without a posted date takes it from its listed post, if
 // known (contacts filled by hand used to be saved without one).
 {

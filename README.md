@@ -1,6 +1,6 @@
 # Autoemail
 
-Local app that connects to your Gmail and Outlook (personal) accounts and creates one email draft per recipient from a single Subject/Body/recipient-list form. Drafts are created, never sent.
+Local app that scrapes Craigslist posts for their contact details, connects your Gmail and Outlook (personal) accounts, and creates one email draft per scraped post from a Subject/Body template. Drafts are created, never sent.
 
 Also includes a Craigslist contact scraper that collects reply-contact details from public listings.
 
@@ -64,9 +64,11 @@ Skip this if you only need the draft creator. Without it, "Start Scraping" fails
 npm run dev
 ```
 
-Open `http://localhost:<PORT>` (the startup log prints the exact URL), connect your accounts, and fill in the form. Recipients accept one address per line or comma-separated. Each recipient gets its own draft with the same subject/body, distributed round-robin across the checked accounts.
+Open `http://localhost:<PORT>` (the startup log prints the exact URL), connect your accounts, and fill in the form. There is no recipient list: Compose drafts to the scraped posts themselves. **Create drafts** takes the newest scraped posts that have an email and no phone, that are not sent or marked red, and that have no draft yet; *Posted within* and *How many* narrow them (up to 100 per click). Each post gets one draft, addressed to its Craigslist relay (or the post's other email if it has no relay), filled from that post's `{{title}}`, `{{city}}` and other fields, with the checked accounts taking turns. The post is then tagged *Drafted* so it is never drafted twice, by Compose or by automatic drafts.
 
 **Templates.** In Compose, type a Template name and press *Save as template* to keep the subject and body; pick it from *Template* later to fill them in, edit, then *Save changes* or *Delete*. Templates live in `data/templates.json` and are shared by every device.
+
+**Automatic drafts.** In Drafts → *Automatic drafts*, give each Gmail a template and press *Turn on*. From then on, every newly scraped post that has an email (the Craigslist relay, or another address) and **no phone** gets one draft, made from the template of the next mailbox in turn. Posts scraped before you turned it on are never drafted. Templates can use `{{title}}` (without the category Craigslist appends), `{{city}}`, `{{state}}`, `{{category}}`, `{{link}}` and `{{posted}}`; the chips above the subject insert them. Nothing is sent: each draft waits in Gmail, shows under *Waiting in Drafts*, and its row in the list is tagged *Drafted*. A mailbox whose sign-in expired is paused for 15 minutes (its posts go to the other mailboxes); a post Gmail refuses is tried 3 times. Settings and counters are in `data/automation.json`; each drafted contact gets an `autoDraft` field.
 
 **Draft reminders.** The app never sends mail. Every draft it creates is logged in `data/drafts.json`, and every 15 minutes (or on *Check now*) it reads each account's Drafts folder: drafts still there are listed under *Waiting in Drafts*, counted on the Drafts tab, and announced once per page load, each with an *Open in Gmail* link so you can review, fix and send it yourself. A draft drops off the list once it leaves the Drafts folder (you sent or deleted it). Reading drafts uses the same `gmail.compose` scope, so already-connected accounts need nothing new.
 
