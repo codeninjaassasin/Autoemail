@@ -9,3 +9,6 @@ node_modules/
 # Logs / throwaway test scripts
 *.log
 _*.js
+
+# Hallmark design runs: screenshots hold live contact data
+.hallmark/
