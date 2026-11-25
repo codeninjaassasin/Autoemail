@@ -790,7 +790,7 @@ function paintRows() {
   tbody.innerHTML =
     shown.map(rowHtml).join('') +
     (more > 0
-      ? `<tr class="more-row"><td colspan="10"><button type="button" class="ghost sm more-btn">Show ${Math.min(PAGE_ROWS, more)} more (${more} left)</button></td></tr>`
+      ? `<tr class="more-row"><td colspan="10"><button type="button" class="btn btn--quiet btn--sm more-btn">Show ${Math.min(PAGE_ROWS, more)} more (${more} left)</button></td></tr>`
       : '');
   const sentinel = tbody.querySelector('.more-row');
   if (sentinel) moreObserver.observe(sentinel);

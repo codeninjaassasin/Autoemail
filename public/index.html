@@ -3,86 +3,76 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Autoemail — Lead Ops Console</title>
+    <title>Autoemail lead console</title>
+    <meta name="description" content="Scrape Craigslist posts for reply contacts, watch the run live, and turn the list into email drafts." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;500&family=Host+Grotesk:wght@400;500&display=swap"
       rel="stylesheet"
     />
     <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <a class="skip" href="#main">Skip to content</a>
     <div class="shell">
-      <!-- TOP BAR -->
       <header class="topbar">
-        <div class="brand">
-          <span class="mark" aria-hidden="true"></span>
+        <a class="brand" href="/" aria-label="autoemail, home">
+          <img class="brand-mark" src="/favicon.svg" width="20" height="20" alt="" />
           <span class="wordmark">autoemail</span>
-          <span class="tagline">lead ops console</span>
-        </div>
-        <div class="livestrip" id="livestrip">
-          <span class="dot" id="bar-dot"></span>
+        </a>
+        <nav class="tabs" aria-label="Sections">
+          <button type="button" data-tab="scraper" class="active">Scraper</button>
+          <button type="button" data-tab="drafts">Drafts</button>
+          <button type="button" data-tab="storage">Storage</button>
+        </nav>
+        <div class="livestrip" id="livestrip" role="status" aria-label="Run state">
+          <span class="dot" id="bar-dot" aria-hidden="true"></span>
           <span class="live-state" id="bar-status">idle</span>
-          <span class="live-sep"></span>
           <span class="live-item"><b id="bar-workers">0/0</b> workers</span>
           <span class="live-item"><b id="bar-queue">0</b> queued</span>
           <span class="live-item"><b id="bar-stored">0</b> stored</span>
-          <span class="live-item"><b id="bar-ram">–</b> rss</span>
+          <span class="live-item"><b id="bar-ram">…</b> rss</span>
         </div>
-        <a class="ghost sm signout" href="/admin" title="Session management (admin password)">Admin</a>
+        <a class="btn btn--quiet btn--sm signout" href="/admin" title="Session management (admin password)">Admin</a>
       </header>
 
-      <!-- NAV RAIL -->
-      <nav class="rail tabs">
-        <button data-tab="scraper" class="active" title="Scraper">
-          <span class="ico">⌁</span><span class="lbl">Scraper</span>
-        </button>
-        <button data-tab="drafts" title="Drafts">
-          <span class="ico">✎</span><span class="lbl">Drafts</span>
-        </button>
-        <button data-tab="storage" title="Storage">
-          <span class="ico">▤</span><span class="lbl">Storage</span>
-        </button>
-      </nav>
-
-      <!-- MAIN -->
-      <main class="main">
+      <main class="main" id="main">
         <!-- SCRAPER -->
-        <section id="scraper" class="tab active">
+        <section id="scraper" class="tab active" aria-label="Scraper">
           <div class="tracerwrap">
-          <div class="tracer compact" id="tracer">
-            <div class="stat stat-lead" id="stat-status">
-              <span class="k">Status</span><span class="v" id="t-status">idle</span>
+            <div class="tracer compact" id="tracer">
+              <div class="stat stat-lead" id="stat-status">
+                <span class="k">Status</span><span class="v" id="t-status">idle</span>
+              </div>
+              <div class="stat"><span class="k">Workers</span><span class="v mono" id="t-workers">0 / 0</span></div>
+              <div class="stat"><span class="k">Queue pending</span><span class="v mono" id="t-queue">0 / 0</span></div>
+              <div class="stat"><span class="k">New posts waiting</span><span class="v mono" id="t-newq" title="Posts not in the contact list yet. Workers always take these first.">0</span></div>
+              <div class="stat stat-ok"><span class="k">Stored contacts</span><span class="v mono" id="t-stored">0</span></div>
+              <div class="stat stat-ok"><span class="k">Relays caught</span><span class="v mono" id="t-relays">0</span></div>
+              <div class="stat stat-bad"><span class="k">Gated by captcha</span><span class="v mono" id="t-gated">0</span></div>
+              <div class="stat"><span class="k">Proxies usable</span><span class="v mono" id="t-proxu">0</span></div>
+              <div class="stat"><span class="k">Attempts</span><span class="v mono" id="t-attempts">0</span></div>
+              <div class="stat"><span class="k">Cycles</span><span class="v mono" id="t-cycles">0</span></div>
+              <div class="stat"><span class="k">Seen (unique)</span><span class="v mono" id="t-seen">0</span></div>
+              <div class="stat"><span class="k">Dropped</span><span class="v mono" id="t-dropped">0</span></div>
+              <div class="stat"><span class="k">Parked</span><span class="v mono" id="t-parked">0</span></div>
+              <div class="stat"><span class="k">Proxies live</span><span class="v mono" id="t-proxlive">0</span></div>
+              <div class="stat"><span class="k">Proxies stored</span><span class="v mono" id="t-proxs">0</span></div>
+              <div class="stat"><span class="k">Proxies cooled</span><span class="v mono" id="t-proxcool">0</span></div>
+              <div class="stat"><span class="k">Proxy fresh queue</span><span class="v mono" id="t-proxfresh">0</span></div>
+              <div class="stat"><span class="k">Proxy relax queue</span><span class="v mono" id="t-proxrelax">0</span></div>
+              <div class="stat"><span class="k">Proxy auto refresh</span><span class="v mono" id="t-autoref" title="Hourly, or after 15 min when fewer than 100 verified proxies are usable">…</span></div>
+              <div class="stat"><span class="k">Solver</span><span class="v" id="t-solver">none</span></div>
+              <div class="stat"><span class="k">Contacts in db</span><span class="v mono" id="t-contacts">0</span></div>
+              <div class="stat"><span class="k">Memory rss</span><span class="v mono" id="t-ram">…</span></div>
+              <div class="stat"><span class="k">Heap used</span><span class="v mono" id="t-heap">…</span></div>
+              <div class="stat"><span class="k">Run uptime</span><span class="v mono" id="t-uptime">…</span></div>
+              <div class="stat"><span class="k">Areas / categories</span><span class="v mono" id="t-scope">…</span></div>
+              <button id="tracerToggle" class="tracer-toggle" type="button" aria-expanded="false">All stats</button>
             </div>
-            <div class="stat"><span class="k">Workers</span><span class="v mono" id="t-workers">0 / 0</span></div>
-            <div class="stat"><span class="k">Queue pending</span><span class="v mono" id="t-queue">0 / 0</span></div>
-            <div class="stat"><span class="k">New posts waiting</span><span class="v mono" id="t-newq" title="Posts not in the contact list yet. Workers always take these first.">0</span></div>
-            <div class="stat stat-ok"><span class="k">Stored · contact</span><span class="v mono" id="t-stored">0</span></div>
-            <div class="stat stat-ok"><span class="k">Relays caught</span><span class="v mono" id="t-relays">0</span></div>
-            <div class="stat stat-bad"><span class="k">Gated (captcha)</span><span class="v mono" id="t-gated">0</span></div>
-            <div class="stat"><span class="k">Proxies usable</span><span class="v mono" id="t-proxu">0</span></div>
-            <div class="stat"><span class="k">Attempts</span><span class="v mono" id="t-attempts">0</span></div>
-            <div class="stat"><span class="k">Cycles</span><span class="v mono" id="t-cycles">0</span></div>
-            <div class="stat"><span class="k">Seen (unique)</span><span class="v mono" id="t-seen">0</span></div>
-            <div class="stat"><span class="k">Dropped</span><span class="v mono" id="t-dropped">0</span></div>
-            <div class="stat"><span class="k">Parked</span><span class="v mono" id="t-parked">0</span></div>
-            <div class="stat"><span class="k">Proxies live</span><span class="v mono" id="t-proxlive">0</span></div>
-            <div class="stat"><span class="k">Proxies stored</span><span class="v mono" id="t-proxs">0</span></div>
-            <div class="stat"><span class="k">Proxies cooled</span><span class="v mono" id="t-proxcool">0</span></div>
-            <div class="stat"><span class="k">Proxy fresh q</span><span class="v mono" id="t-proxfresh">0</span></div>
-            <div class="stat"><span class="k">Proxy relax q</span><span class="v mono" id="t-proxrelax">0</span></div>
-            <div class="stat"><span class="k">Proxy auto-refresh</span><span class="v mono" id="t-autoref" title="Hourly, or after 15 min when fewer than 100 verified proxies are usable">–</span></div>
-            <div class="stat"><span class="k">Solver</span><span class="v" id="t-solver">none</span></div>
-            <div class="stat"><span class="k">Contacts in db</span><span class="v mono" id="t-contacts">0</span></div>
-            <div class="stat"><span class="k">Memory rss</span><span class="v mono" id="t-ram">–</span></div>
-            <div class="stat"><span class="k">Heap used</span><span class="v mono" id="t-heap">–</span></div>
-            <div class="stat"><span class="k">Run uptime</span><span class="v mono" id="t-uptime">–</span></div>
-            <div class="stat"><span class="k">Areas / cats</span><span class="v mono" id="t-scope">–</span></div>
-            <button id="tracerToggle" class="tracer-toggle" type="button" aria-expanded="false">All stats</button>
-          </div>
           </div>
 
           <details class="setup" id="setup" open>
@@ -90,124 +80,127 @@
               <span class="setup-title">Run setup</span>
               <span class="run-sentence" id="runSentence">Pick areas and categories to start.</span>
             </summary>
-          <div class="selectors">
-            <div class="field">
-              <label>Areas</label>
-              <div class="ms" id="ms-areas"></div>
-            </div>
-            <div class="field">
-              <label>Categories</label>
-              <div class="ms" id="ms-categories"></div>
-            </div>
-            <div class="field runparams">
-              <label>Run parameters</label>
-              <div class="param-grid">
-                <label class="p">Query<input id="query" placeholder="optional keywords" /></label>
-                <label class="p">Workers<input id="concurrency" type="number" min="1" max="30" value="10" /></label>
-                <label class="p">Max proxies / post<input id="maxProxiesPerPost" type="number" min="10" max="1000" value="100" /></label>
-                <label class="p">Reply wait (s)<input id="replyWait" type="number" min="4" max="120" value="25" /></label>
-                <label class="p">Page timeout (s, 0 = none)<input id="pageTimeout" type="number" min="0" max="600" value="60" /></label>
-                <label class="p">Loop delay (s)<input id="cycleDelay" type="number" min="5" max="600" value="45" /></label>
-                <label class="p chk"><input type="checkbox" id="loop" /><span>Loop continuously</span></label>
-                <label class="p chk"><input type="checkbox" id="useProxies" /><span>Use proxy pool</span></label>
-                <label class="p chk"><input type="checkbox" id="headless" checked /><span>Headless (uncheck to watch browser)</span></label>
+            <div class="selectors">
+              <div class="field">
+                <label>Areas</label>
+                <div class="ms" id="ms-areas"></div>
               </div>
-              <div class="actions">
-                <button id="startScrape" class="primary">Start scraping</button>
-                <button id="stopScrape" class="ghost" disabled>Stop</button>
-                <button id="reloadData" class="ghost">Reload stored data</button>
-                <button id="refreshProxies" class="ghost">Refresh proxies</button>
-                <button id="dedupe" class="ghost">Dedupe phones</button>
+              <div class="field">
+                <label>Categories</label>
+                <div class="ms" id="ms-categories"></div>
+              </div>
+              <div class="field runparams">
+                <label>Run parameters</label>
+                <div class="param-grid">
+                  <label class="p">Query<input id="query" placeholder="optional keywords" /></label>
+                  <label class="p">Workers<input id="concurrency" type="number" min="1" max="30" value="10" /></label>
+                  <label class="p">Max proxies per post<input id="maxProxiesPerPost" type="number" min="10" max="1000" value="100" /></label>
+                  <label class="p">Reply wait (s)<input id="replyWait" type="number" min="4" max="120" value="25" /></label>
+                  <label class="p">Page timeout (s, 0 for none)<input id="pageTimeout" type="number" min="0" max="600" value="60" /></label>
+                  <label class="p">Loop delay (s)<input id="cycleDelay" type="number" min="5" max="600" value="45" /></label>
+                  <label class="p chk"><input type="checkbox" id="loop" /><span>Loop continuously</span></label>
+                  <label class="p chk"><input type="checkbox" id="useProxies" /><span>Use proxy pool</span></label>
+                  <label class="p chk"><input type="checkbox" id="headless" checked /><span>Headless (uncheck to watch the browser)</span></label>
+                </div>
+                <div class="actions">
+                  <button id="startScrape" class="btn btn--primary" type="button">Start scraping</button>
+                  <button id="stopScrape" class="btn btn--quiet" type="button" disabled>Stop</button>
+                  <span class="actions-gap" aria-hidden="true"></span>
+                  <button id="reloadData" class="btn btn--quiet" type="button">Reload stored data</button>
+                  <button id="refreshProxies" class="btn btn--quiet" type="button">Refresh proxies</button>
+                  <button id="dedupe" class="btn btn--quiet" type="button">Dedupe phones</button>
+                </div>
               </div>
             </div>
-          </div>
           </details>
 
-          <div class="refreshbar" id="refreshbar">
-            <label class="chkfilter">
-              <input type="checkbox" id="refreshToggle" />
-              <span>Refresh unsent relays</span>
-            </label>
-            <span class="refresh-state" id="r-state">off</span>
-            <span class="refresh-item" id="r-scope" title="Refresh checks only the unsent posts the list below shows (its filters apply)."></span>
-            <span class="refresh-item"><b id="r-fresh">0</b> fresh</span>
-            <span class="refresh-item"><b id="r-unverified">0</b> unverified</span>
-            <span class="refresh-item"><b id="r-expired">0</b> expired</span>
-            <span class="refresh-item"><b id="r-unchecked">0</b> not checked</span>
-            <span class="refresh-item"><b id="r-changes">0</b> relay changes</span>
-            <span class="refresh-item" id="r-sweep"></span>
-          </div>
-
-          <div class="resultsbar">
-            <div class="filters" role="group" aria-label="Sent status">
-              <button class="filter active" data-filter="all" title="Every listed post, scraped or not">All</button>
-              <button class="filter" data-filter="scraped" title="Posts whose contact was scraped or filled in">Scraped</button>
-              <button class="filter" data-filter="unsent" title="All posts not marked sent">Unsent</button>
-              <button class="filter" data-filter="sent">Sent</button>
+          <div class="ledgerhead">
+            <div class="refreshbar" id="refreshbar">
+              <label class="chkfilter">
+                <input type="checkbox" id="refreshToggle" />
+                <span>Refresh unsent relays</span>
+              </label>
+              <span class="refresh-state" id="r-state">off</span>
+              <span class="refresh-item" id="r-scope" title="Refresh checks only the unsent posts the list below shows (its filters apply)."></span>
+              <span class="refresh-item"><b id="r-fresh">0</b> fresh</span>
+              <span class="refresh-item"><b id="r-unverified">0</b> unverified</span>
+              <span class="refresh-item"><b id="r-expired">0</b> expired</span>
+              <span class="refresh-item"><b id="r-unchecked">0</b> not checked</span>
+              <span class="refresh-item"><b id="r-changes">0</b> relay changes</span>
+              <span class="refresh-item" id="r-sweep"></span>
             </div>
-            <label class="locfilter">
-              <span class="sr-only">Category</span>
-              <select id="catFilter"><option value="">All categories</option></select>
-            </label>
-            <label class="locfilter">
-              <span class="sr-only">State</span>
-              <select id="stateFilter"><option value="">All states</option></select>
-            </label>
-            <label class="locfilter city">
-              <span class="sr-only">City or area</span>
-              <input id="cityFilter" type="search" placeholder="City or area" autocomplete="off" />
-            </label>
-            <label class="locfilter phone">
-              <span class="sr-only">Phone number</span>
-              <input id="phoneFilter" type="search" inputmode="tel" placeholder="Phone number" autocomplete="off" />
-            </label>
-            <label class="locfilter">
-              <span class="sr-only">Relay freshness</span>
-              <select id="freshFilter">
-                <option value="">Any freshness</option>
-                <option value="fresh">Fresh</option>
-                <option value="unverified">Unverified</option>
-                <option value="expired">Expired</option>
-                <option value="unchecked">Not checked</option>
-              </select>
-            </label>
-            <label class="chkfilter">
-              <input type="checkbox" id="phoneOnly" />
-              <span>Has phone</span>
-            </label>
-            <span id="rowCount" class="rowcount"></span>
-            <button id="logToggle" class="ghost sm" type="button" aria-pressed="true">Hide trace</button>
+
+            <div class="resultsbar">
+              <div class="filters" role="group" aria-label="Sent status">
+                <button type="button" class="filter active" data-filter="all" title="Every listed post, scraped or not">All</button>
+                <button type="button" class="filter" data-filter="scraped" title="Posts whose contact was scraped or filled in">Scraped</button>
+                <button type="button" class="filter" data-filter="unsent" title="All posts not marked sent">Unsent</button>
+                <button type="button" class="filter" data-filter="sent">Sent</button>
+              </div>
+              <label class="locfilter">
+                <span class="sr-only">Category</span>
+                <select id="catFilter"><option value="">All categories</option></select>
+              </label>
+              <label class="locfilter">
+                <span class="sr-only">State</span>
+                <select id="stateFilter"><option value="">All states</option></select>
+              </label>
+              <label class="locfilter city">
+                <span class="sr-only">City or area</span>
+                <input id="cityFilter" type="search" placeholder="City or area" autocomplete="off" />
+              </label>
+              <label class="locfilter phone">
+                <span class="sr-only">Phone number</span>
+                <input id="phoneFilter" type="search" inputmode="tel" placeholder="Phone number" autocomplete="off" />
+              </label>
+              <label class="locfilter">
+                <span class="sr-only">Relay freshness</span>
+                <select id="freshFilter">
+                  <option value="">Any freshness</option>
+                  <option value="fresh">Fresh</option>
+                  <option value="unverified">Unverified</option>
+                  <option value="expired">Expired</option>
+                  <option value="unchecked">Not checked</option>
+                </select>
+              </label>
+              <label class="chkfilter">
+                <input type="checkbox" id="phoneOnly" />
+                <span>Has phone</span>
+              </label>
+              <span id="rowCount" class="rowcount"></span>
+              <button id="logToggle" class="btn btn--quiet btn--sm" type="button" aria-pressed="true">Hide trace</button>
+            </div>
           </div>
 
           <div class="resultsplit" id="resultsplit">
-          <div class="tablewrap">
-            <table id="scrapeTable" class="results-table">
-              <thead>
-                <tr><th>Sent</th><th>Location</th><th>Posted</th><th>Post</th><th>Relay email</th><th>Checked</th><th>Phones</th><th>Other emails</th><th>Note</th><th></th></tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-            <div id="emptyState" class="empty">No contacts yet. Pick areas and start a scrape — only posts with a contact land here.</div>
-          </div>
-          <aside class="tracepane" aria-label="Live trace">
-            <div class="tracehead">
-              <span>Live trace</span>
-              <button id="logClear" class="ghost sm" type="button">Clear</button>
+            <div class="tablewrap">
+              <table id="scrapeTable" class="results-table">
+                <thead>
+                  <tr><th>Sent</th><th>Location</th><th>Posted</th><th>Post</th><th>Relay email</th><th>Checked</th><th>Phones</th><th>Other emails</th><th>Note</th><th><span class="sr-only">Actions</span></th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <div id="emptyState" class="empty">No contacts yet. Pick areas and start a scrape; only posts with a contact land here.</div>
             </div>
-            <pre id="scrapeLog" class="tracelog">Waiting for a run…</pre>
-          </aside>
+            <aside class="tracepane" aria-label="Live trace">
+              <div class="tracehead">
+                <span>Live trace</span>
+                <button id="logClear" class="btn btn--quiet btn--sm" type="button">Clear</button>
+              </div>
+              <pre id="scrapeLog" class="tracelog">Waiting for a run…</pre>
+            </aside>
           </div>
         </section>
 
         <!-- DRAFTS -->
-        <section id="drafts" class="tab">
+        <section id="drafts" class="tab" aria-label="Drafts">
           <div class="draftgrid">
             <aside class="acctpanel">
               <h2>Connected accounts</h2>
               <ul id="accounts" class="accounts"></ul>
               <div class="connect">
-                <a href="/connect/google">Connect Gmail</a>
-                <a href="/connect/microsoft">Connect Outlook</a>
+                <a class="btn btn--quiet" href="/connect/google">Connect Gmail</a>
+                <a class="btn btn--quiet" href="/connect/microsoft">Connect Outlook</a>
               </div>
             </aside>
             <div class="composepanel">
@@ -217,7 +210,7 @@
               <div id="editor"></div>
               <label>Recipients<textarea id="recipients" rows="4" placeholder="one per line or comma-separated"></textarea></label>
               <div class="actions">
-                <button id="create" class="primary">Create drafts</button>
+                <button id="create" class="btn btn--primary" type="button">Create drafts</button>
               </div>
               <pre id="draftResult" class="result" hidden></pre>
             </div>
@@ -225,11 +218,11 @@
         </section>
 
         <!-- STORAGE -->
-        <section id="storage" class="tab">
-          <div class="resultsbar">
+        <section id="storage" class="tab" aria-label="Storage">
+          <div class="storagehead">
             <h2 class="panel-h">Database storage format</h2>
-            <span class="rowcount">On-disk JSON under data/ · live counts</span>
-            <button id="reloadFormat" class="ghost sm">Refresh</button>
+            <span class="rowcount">On-disk JSON under data/, with live counts</span>
+            <button id="reloadFormat" class="btn btn--quiet btn--sm" type="button">Refresh</button>
           </div>
           <pre id="dbFormat" class="result tall"></pre>
         </section>
