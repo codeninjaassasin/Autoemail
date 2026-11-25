@@ -234,6 +234,7 @@ async function runWorker(ctx, myToken) {
         if (ctx.useProxies && proxy) {
           if (proxyWorked) {
             proxies.markSuccess(proxy); // proven good -> stored live, keep using
+            if (row.relay) proxies.markRelay(proxy);
           } else {
             if (gated) {
               state.gated++;

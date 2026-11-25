@@ -264,6 +264,7 @@ async function refreshOne(ctx, hold, url) {
 
     if (contacts.isRelay(scraped.relay)) {
       proxies.markSuccess(proxy);
+      proxies.markRelay(proxy);
       const before = stored.relay;
       const row = contacts.upsert(scraped, 'refresh');
       const changed = !!before && contacts.isRelay(before) && before !== scraped.relay;

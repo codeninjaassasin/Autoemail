@@ -1,0 +1,18 @@
+[Unit]
+Description=Autoemail server + Craigslist scraper (/opt/autoemail)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/autoemail
+Environment=PATH=/home/mac/.local/node/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/mac/.local/node/bin/node server/index.js
+# After the server is up, start a scrape with the settings saved from the UI
+# (skipped if one is already running). "-" = don't fail the service if it can't.
+ExecStartPost=-/home/mac/.local/node/bin/node scripts/start-scrape.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

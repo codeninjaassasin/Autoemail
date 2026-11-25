@@ -194,6 +194,16 @@ function markSuccess(server) {
   scheduleFlush();
 }
 
+// The proxy got a relay email out of the reply panel, not just the page.
+// Single-post scrapes try proxies with the most relays first.
+function markRelay(server) {
+  const p = find(server);
+  if (!p) return;
+  p.relays = (p.relays || 0) + 1;
+  p.lastRelay = new Date().toISOString();
+  scheduleFlush();
+}
+
 // A failure that does NOT cool the proxy (dead/slow/net). Drops it after
 // MAX_LINEAR_FAILS consecutive failures.
 function markFail(server) {
@@ -269,6 +279,7 @@ module.exports = {
   addProxies,
   setLive,
   markSuccess,
+  markRelay,
   markFail,
   markGated,
   usable,

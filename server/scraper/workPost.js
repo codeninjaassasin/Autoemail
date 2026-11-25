@@ -68,12 +68,25 @@ async function workPost(context, url, opts = {}) {
   let replyEmail = null;
   let siteKey = null;
   const replyPhones = [];
+  // failFastReply: stop the visit as soon as a reply request fails, instead of
+  // waiting out replyWaitMs. Many exits load the page but can't reach the reply
+  // endpoint (tunnel refused, 4xx/5xx); without this each such visit costs the
+  // full reply wait. The note says "blocked", so callers treat it as a proxy failure.
+  let replyFailed = '';
+  if (opts.failFastReply) {
+    page.on('requestfailed', (req) => {
+      if (!/\/reply\//i.test(req.url())) return;
+      const err = (req.failure() && req.failure().errorText) || 'failed';
+      if (!/ERR_ABORTED/i.test(err)) replyFailed = replyFailed || err;
+    });
+  }
   // Reply flow: POST /init -> {nonce} (or + siteKey_hCaptcha) ; POST /popup ->
   // {options:{emailOk,phoneOk,textOk,chatOk}} ; clicking an option header then
   // calls e.g. POST /mailto -> {"email":"<hash>@res.craigslist.org",...}.
   page.on('response', async (res) => {
     const u = res.url();
     if (!/\/reply\//i.test(u)) return;
+    if (opts.failFastReply && res.status() >= 400) replyFailed = replyFailed || `status ${res.status()}`;
     try {
       const body = await res.text();
       if (/siteKey_hCaptcha/i.test(body)) {
@@ -138,6 +151,10 @@ async function workPost(context, url, opts = {}) {
       const opened = new Set();
       let captchaSince = 0;
       while (Date.now() < deadline) {
+        if (replyFailed) {
+          row.note = `reply blocked (${replyFailed})`;
+          break;
+        }
         // Once the gate passes, the panel lists option headers (email / call /
         // text / chat). The contact is only revealed after clicking each one.
         // Click EVERY option button, whatever its title (email, call, text,

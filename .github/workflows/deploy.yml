@@ -1,0 +1,94 @@
+name: Deploy to VM
+
+# Every push to main is checked on GitHub's machines, then deployed to the VM
+# by the self-hosted runner installed there (scripts/install-runner.sh).
+# Only push/manual triggers: never pull_request, so code from a fork can't
+# reach the VM's runner through this workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vm
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Syntax check every JS file
+        run: git ls-files '*.js' | xargs -n1 node --check
+      - name: Server modules load
+        run: node -e "for (const m of ['./server/config','./server/contacts','./server/posts','./server/proxies','./server/scraper/postScrape','./server/scraper/refresher']) require(m)"
+
+  deploy:
+    needs: check
+    runs-on: [self-hosted, autoemail]
+    env:
+      APP_DIR: /opt/autoemail
+    steps:
+      - name: Pull main into the app directory
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$branch" != "main" ]; then
+            echo "::error::$APP_DIR is on branch '$branch', not main. Run 'git checkout main' there, then re-run this deploy."
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "::error::$APP_DIR has uncommitted changes to tracked files. Commit or stash them there, then re-run this deploy."
+            git status --short --untracked-files=no
+            exit 1
+          fi
+          before=$(git rev-parse HEAD)
+          git fetch --quiet origin main
+          git merge --ff-only origin/main
+          echo "BEFORE=$before" >> "$GITHUB_ENV"
+          echo "Deployed $(git log --oneline -1)"
+
+      - name: Install dependencies (only when the lockfile changed)
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          export PATH="$HOME/.local/node/bin:$PATH"
+          if git diff --quiet "$BEFORE" HEAD -- package.json package-lock.json && [ -d node_modules ]; then
+            echo "Dependencies unchanged."
+          else
+            npm ci
+            npx playwright install chromium
+          fi
+
+      - name: Restart the service
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          cd "$APP_DIR"
+          # Keep the installed unit in step with the one in the repo.
+          if ! cmp -s deploy/autoemail.service "$HOME/.config/systemd/user/autoemail.service"; then
+            install -D -m 644 deploy/autoemail.service "$HOME/.config/systemd/user/autoemail.service"
+            systemctl --user daemon-reload
+          fi
+          systemctl --user restart autoemail
+
+      - name: Health check
+        run: |
+          export PATH="$HOME/.local/node/bin:$PATH"
+          cd "$APP_DIR"
+          for i in $(seq 1 30); do
+            if node scripts/start-scrape.js --status; then exit 0; fi
+            sleep 2
+          done
+          echo "::error::The server did not come up after the restart."
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" journalctl --user -u autoemail -n 40 --no-pager
+          exit 1

@@ -433,21 +433,9 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
 }
 .del-row:hover { background: var(--bad); color: #fff; border-color: var(--bad); }
 .del-row.on { background: var(--bad); color: #fff; border-color: var(--bad); }
-.row-acts { display: inline-flex; gap: 4px; align-items: center; }
-.rush-btn {
-  width: 24px; height: 24px; line-height: 1; padding: 0;
-  border: 1px solid var(--line); border-radius: 6px;
-  background: var(--surface); cursor: pointer; font-size: 13px;
-}
-.rush-btn:hover { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 12%, var(--surface)); }
-.rush-btn.on { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 22%, var(--surface)); animation: rush-pulse 1.1s ease-in-out infinite; }
-@keyframes rush-pulse { 50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 30%, transparent); } }
-@media (prefers-reduced-motion: reduce) { .rush-btn.on { animation: none; } }
 .del-row.on:hover { background: var(--surface); color: var(--bad); }
 .results-table tr.row-flagged td { background: color-mix(in srgb, var(--bad) 16%, var(--surface)); }
 .results-table tr.row-flagged:hover td { background: color-mix(in srgb, var(--bad) 22%, var(--surface)); }
-.results-table tr.row-rushing td { background: color-mix(in srgb, var(--ok) 18%, var(--surface)); }
-.results-table tr.row-rushing:hover td { background: color-mix(in srgb, var(--ok) 24%, var(--surface)); }
 .results-table td:nth-child(7) { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; white-space: nowrap; } /* phones */
 .phone-line { display: flex; align-items: center; gap: 6px; }
 .phone-line + .phone-line { margin-top: 4px; }
@@ -644,16 +632,19 @@ a.title-clamp:hover { color: var(--signal); text-decoration: underline; }
 }
 .signout:hover { background: var(--surface-2); }
 
-/* Hover popup on a row 👊 is working on */
-.rush-tip {
-  position: fixed; z-index: 60; pointer-events: none;
-  display: flex; flex-direction: column; gap: 2px;
-  max-width: 320px; padding: 8px 11px; border-radius: 8px;
-  background: var(--surface); color: var(--ink);
-  border: 1px solid color-mix(in srgb, var(--ok) 55%, var(--line));
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-  font-size: 12.5px; line-height: 1.4;
+/* ▶ Scrape one post now (rows not scraped yet) */
+.row-actions { display: inline-flex; align-items: center; gap: 6px; }
+.post-scrape {
+  display: inline-grid; place-items: center;
+  width: 24px; height: 24px; padding: 0;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--signal); cursor: pointer;
 }
-.rush-tip[hidden] { display: none; }
-.rush-tip b { color: var(--ok); font-weight: 600; }
-.rush-tip-sub { color: var(--muted); font-size: 11.5px; }
+.post-scrape:hover { background: var(--signal); color: var(--signal-ink); border-color: var(--signal); }
+.post-scrape:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.post-scrape:disabled { opacity: 0.5; cursor: progress; }
+.post-scrape.busy { color: var(--live); border-color: var(--live); background: var(--live-weak); animation: post-scrape-pulse 1.4s ease-in-out infinite; }
+.post-scrape.busy:hover { background: var(--bad); color: #fff; border-color: var(--bad); animation: none; }
+.post-scraping { color: var(--live); font-size: 12px; white-space: nowrap; }
+@keyframes post-scrape-pulse { 50% { box-shadow: 0 0 0 3px var(--live-weak); } }
+@media (prefers-reduced-motion: reduce) { .post-scrape.busy { animation: none; } }
