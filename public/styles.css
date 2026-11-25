@@ -8,6 +8,7 @@
 /* Hallmark · dismissed F6 · the lead reading is the run state as a word (running, idle), not a figure */
 /* Hallmark · answered F7 · the six row icon controls share one recipe on purpose: they sit side by side in every ledger row and must read as one set */
 /* Hallmark · answered F7 · the six panels (telemetry, setup, ledger, accounts, waiting drafts, compose) share one surface recipe on purpose: an app screen reads as one set of tool panels on one ground */
+/* Hallmark · dropped recipients · Compose now drafts to the scraped posts themselves (email, no phone, no draft yet), so a typed recipient list has no job */
 @import url("./tokens.css");
 @import url("./base.css");
 
@@ -357,6 +358,46 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
 .r-meta { font-size: var(--text-xs); color: var(--color-muted); }
 .remindlist li.is-old .r-meta { color: var(--color-accent); }
 .remindlist li.remind-err .r-meta { color: var(--color-bad); }
+/* Right column: automatic drafts above compose. */
+.draftmain { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; }
+.autopanel { background: var(--color-paper-2); color: var(--color-ink); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-md); }
+.autohead { display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
+.autohead h2 { margin: 0; }
+.auto-state { font-size: var(--text-xs); color: var(--color-muted); }
+.auto-state.is-on { color: var(--color-accent); }
+.autohead .btn { margin-left: auto; }
+.auto-sub { margin: var(--space-2xs) 0 var(--space-sm); max-width: 80ch; font-size: var(--text-xs); line-height: 1.5; color: var(--color-muted); }
+.autotablewrap { overflow-x: auto; }
+.autotable { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.autotable th { text-align: left; font-weight: 500; font-size: var(--text-xs); color: var(--color-muted); padding: 0 var(--space-sm) var(--space-2xs) 0; border-bottom: var(--rule-hair) solid var(--color-rule-2); }
+.autotable td { padding: var(--space-xs) var(--space-sm) var(--space-xs) 0; border-bottom: var(--rule-hair) solid var(--color-rule); vertical-align: middle; }
+.autotable td.sub { color: var(--color-muted); font-size: var(--text-xs); }
+.autotable tr:last-child td { border-bottom: 0; }
+.auto-mail { font-family: var(--font-outlier); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.auto-tpl { min-width: 180px; cursor: pointer; }
+.auto-on { color: var(--color-accent); font-size: var(--text-xs); }
+.auto-dim { color: var(--color-muted); font-size: var(--text-xs); }
+.auto-bad { color: var(--color-bad); font-size: var(--text-xs); }
+.autostats { display: flex; flex-wrap: wrap; gap: var(--space-xs) var(--space-lg); margin: var(--space-sm) 0 0; }
+.autostats div { display: flex; align-items: baseline; gap: var(--space-xs); }
+.autostats dt { font-size: var(--text-xs); color: var(--color-muted); }
+.autostats dd { margin: 0; font-family: var(--font-outlier); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.auto-msg { min-height: 1lh; margin: var(--space-xs) 0 0; font-size: var(--text-xs); color: var(--color-muted); }
+.auto-msg.is-bad { color: var(--color-bad); }
+.auto-msg:empty { min-height: 0; margin: 0; }
+/* Fields a template fills from the post, inserted at the cursor. */
+.fieldbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs); margin: 0 0 var(--space-sm); }
+.fieldbar-label { font-size: var(--text-xs); color: var(--color-muted); margin-right: var(--space-2xs); }
+.field-chip {
+  min-height: var(--control-h-sm); padding: 0 var(--space-xs); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-pill);
+  background: var(--color-cool-soft); color: var(--color-ink); font: 400 var(--text-xs)/1 var(--font-outlier); cursor: pointer;
+  transition: border-color var(--dur-short) var(--ease-out), transform var(--dur-micro) var(--ease-out);
+}
+.field-chip:hover { border-color: var(--color-cool); }
+.field-chip:active { transform: translateY(1px); }
+.field-chip:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+/* Ledger: an automatic draft waits for this post. */
+.draft-chip { display: inline-block; margin-left: var(--space-2xs); padding: 0 var(--space-2xs); border: var(--rule-hair) solid var(--color-accent); border-radius: 4px; color: var(--color-ink); background: var(--color-accent-soft); font-size: var(--text-xs); line-height: 1.5; white-space: nowrap; }
 /* Template picker above the subject. */
 .tplbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: var(--space-sm); align-items: end; margin-bottom: var(--space-md); padding-bottom: var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
 .tplfield { display: block; font-size: var(--text-xs); color: var(--color-muted); }
@@ -364,6 +405,12 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
 .tplfield > select { cursor: pointer; }
 .tplacts { display: flex; align-items: center; gap: var(--space-xs); min-height: var(--control-h); }
 .draft-note { font-size: var(--text-xs); color: var(--color-muted); }
+/* Compose drafts to scraped posts: how many, and how recent. */
+.targetbar { margin-top: var(--space-md); padding-top: var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); }
+.target-head { margin: 0; font-size: var(--text-sm); font-weight: 500; color: var(--color-ink); }
+.target-sum { margin: var(--space-2xs) 0 var(--space-sm); font-size: var(--text-xs); color: var(--color-muted); max-width: 64ch; }
+.targetfields { display: grid; grid-template-columns: repeat(2, minmax(0, 12rem)); gap: var(--space-sm); }
+@media (max-width: 480px) { .targetfields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 /* Count of drafts waiting, on the Drafts tab. */
 .tabcount { display: inline-block; min-width: 1.6em; margin-left: var(--space-2xs); padding: 0 var(--space-2xs); border-radius: var(--radius-pill); background: var(--color-accent-soft); color: var(--color-ink); font: 500 var(--text-xs)/1.5 var(--font-outlier); text-align: center; font-variant-numeric: tabular-nums; }
 .tabcount[hidden] { display: none; }
@@ -472,4 +519,13 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
   .toast { animation: none; }
   .toast.leaving { transition: none; }
   .tabs button::after { transition: none; }
+}
+/* Phone: each mailbox restacks as address, template picker, state. */
+@media (max-width: 760px) {
+  .autotable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .autotable, .autotable tbody, .autotable tr, .autotable td { display: block; }
+  .autotable tr { padding: var(--space-xs) 0; border-bottom: var(--rule-hair) solid var(--color-rule); }
+  .autotable tr:last-child { border-bottom: 0; }
+  .autotable td { padding: var(--space-3xs) 0; border-bottom: 0; }
+  .auto-tpl { width: 100%; min-width: 0; }
 }

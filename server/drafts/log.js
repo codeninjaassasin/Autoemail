@@ -30,11 +30,13 @@ function save(list) {
 }
 
 function add(entries) {
-  if (!entries.length) return;
+  if (!entries.length) return [];
   const now = new Date().toISOString();
   const all = load();
-  for (const e of entries) all.push({ id: crypto.randomUUID(), status: 'waiting', createdAt: now, ...e });
+  const added = entries.map((e) => ({ id: crypto.randomUUID(), status: 'waiting', createdAt: now, ...e }));
+  all.push(...added);
   save(all);
+  return added;
 }
 
 function all() {
