@@ -26,6 +26,17 @@ Throughout this guide, replace `<PORT>` with your actual value.
 3. **APIs & Services → OAuth consent screen**: User type "External"; add scope `https://www.googleapis.com/auth/gmail.compose`; add your own Gmail address as a test user.
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**, type **Web application**. Add redirect URI `http://localhost:<PORT>/oauth/google/callback`.
 5. Copy the Client ID/Secret into `.env` as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+6. Restart the app (`systemctl --user restart autoemail` on the VM). Until then the Connect Gmail button stays disabled.
+
+Every Gmail you want to connect must be on the consent screen's **test users** list (up to 100) while the app is in "Testing". In Testing, Google also expires the sign-in after 7 days; the Drafts tab then shows "Connect this account again" for that account.
+
+**Connecting from another computer.** Google only accepts `localhost` (or an HTTPS domain) as the redirect, so the sign-in must finish in a browser where `localhost:<PORT>` is this app. From your own computer, open a tunnel and use the app through it while connecting:
+
+```
+ssh -L 3000:localhost:3000 <user>@<vm-address>
+```
+
+Then open `http://localhost:3000`, Drafts → Connect Gmail, and repeat for each account (sign out of Google or use "Use another account" between them).
 
 ### Microsoft (personal Outlook.com / Hotmail accounts)
 
@@ -54,6 +65,10 @@ npm run dev
 ```
 
 Open `http://localhost:<PORT>` (the startup log prints the exact URL), connect your accounts, and fill in the form. Recipients accept one address per line or comma-separated. Each recipient gets its own draft with the same subject/body, distributed round-robin across the checked accounts.
+
+**Templates.** In Compose, type a Template name and press *Save as template* to keep the subject and body; pick it from *Template* later to fill them in, edit, then *Save changes* or *Delete*. Templates live in `data/templates.json` and are shared by every device.
+
+**Draft reminders.** The app never sends mail. Every draft it creates is logged in `data/drafts.json`, and every 15 minutes (or on *Check now*) it reads each account's Drafts folder: drafts still there are listed under *Waiting in Drafts*, counted on the Drafts tab, and announced once per page load, each with an *Open in Gmail* link so you can review, fix and send it yourself. A draft drops off the list once it leaves the Drafts folder (you sent or deleted it). Reading drafts uses the same `gmail.compose` scope, so already-connected accounts need nothing new.
 
 ## Run as a service and auto-deploy (VM)
 

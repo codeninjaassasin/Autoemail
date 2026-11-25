@@ -9,6 +9,9 @@ const accounts = require('./accounts');
 const googleOauth = require('./oauth/google');
 const microsoftOauth = require('./oauth/microsoft');
 const { createDrafts } = require('./drafts/createDrafts');
+const draftLog = require('./drafts/log');
+const reminders = require('./drafts/reminders');
+const templates = require('./templates');
 const scraper = require('./scraper');
 const refresher = require('./scraper/refresher');
 const postScrape = require('./scraper/postScrape');
@@ -106,6 +109,7 @@ function consumeState(state, provider) {
 app.get('/api/accounts', (req, res) => res.json(accounts.list()));
 app.delete('/api/accounts/:id', (req, res) => {
   accounts.remove(req.params.id);
+  draftLog.forgetAccount(req.params.id);
   res.json({ ok: true });
 });
 
@@ -147,12 +151,46 @@ app.get('/oauth/microsoft/callback', async (req, res) => {
 // --- Draft creation ---
 app.post('/api/drafts', async (req, res) => {
   try {
-    const { accountIds, subject, bodyHtml, recipients } = req.body;
-    const results = await createDrafts({ accountIds, subject, bodyHtml, recipients });
+    const { accountIds, subject, bodyHtml, recipients, templateId } = req.body;
+    const results = await createDrafts({ accountIds, subject, bodyHtml, recipients, templateId });
     res.json({ ok: true, results });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });
   }
+});
+
+// Which providers can be connected (credentials present) and the redirect
+// address Google/Microsoft send the browser back to.
+app.get('/api/connect/status', (req, res) =>
+  res.json({
+    google: { configured: !!(config.google.clientId && config.google.clientSecret), redirectUri: config.google.redirectUri },
+    microsoft: { configured: !!(config.microsoft.clientId && config.microsoft.clientSecret), redirectUri: config.microsoft.redirectUri },
+  })
+);
+
+// --- Email templates ---
+app.get('/api/templates', (req, res) => res.json(templates.list()));
+app.post('/api/templates', (req, res) => {
+  try {
+    res.json({ ok: true, template: templates.create(req.body) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+app.put('/api/templates/:id', (req, res) => {
+  try {
+    res.json({ ok: true, template: templates.update(req.params.id, req.body) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+app.delete('/api/templates/:id', (req, res) => res.json({ ok: templates.remove(req.params.id) }));
+
+// --- Draft reminders: drafts this app made that still sit unsent. Read-only. ---
+app.get('/api/reminders', (req, res) => res.json(reminders.summary()));
+app.post('/api/reminders/check', async (req, res) => {
+  await reminders.check().catch(() => {});
+  res.json(reminders.summary());
 });
 
 // --- Contacts store ---
@@ -394,6 +432,23 @@ app.get('/api/db-format', (req, res) => {
         homeAccountId: 'string (microsoft only)',
       },
     },
+    'data/templates.json': {
+      description: 'Email templates picked in the Drafts tab.',
+      shape: 'Array<Template>',
+      record: { id: 'uuid', name: 'string (unique)', subject: 'string', bodyHtml: 'HTML string', createdAt: 'ISOString', updatedAt: 'ISOString' },
+      count: templates.list().length,
+    },
+    'data/drafts.json': {
+      description: 'Drafts this app created, for the reminder. The app never sends; a draft is "gone" once it leaves the Drafts folder (sent or deleted by you). Gone entries are kept 30 days.',
+      shape: 'Array<DraftEntry>',
+      record: {
+        id: 'uuid', accountId: 'uuid', provider: '"google" | "microsoft"', to: 'string', subject: 'string', templateId: 'uuid | null',
+        draftId: 'provider draft id', messageId: 'string (google: current message id)', webLink: 'string (microsoft)',
+        status: '"waiting" | "gone"', createdAt: 'ISOString', goneAt: 'ISOString',
+      },
+      count: draftLog.all().length,
+      waiting: draftLog.waiting().length,
+    },
     'data/proxies.json': {
       description: 'Proxy pool with success/block history.',
       shape: '{ updatedAt: ISOString, proxies: Array<Proxy> }',
@@ -522,6 +577,8 @@ app.listen(config.port, () => {
 });
 // Background: posted dates for listed posts not scraped yet (All list sorting).
 require('./postDates').start(broadcast);
+// Background: every 15 min, check which drafts this app made are still unsent.
+reminders.start();
 // Repair: a contact without a posted date takes it from its listed post, if
 // known (contacts filled by hand used to be saved without one).
 {

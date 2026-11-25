@@ -25,7 +25,7 @@
         </a>
         <nav class="tabs" aria-label="Sections">
           <button type="button" data-tab="scraper" class="active">Scraper</button>
-          <button type="button" data-tab="drafts">Drafts</button>
+          <button type="button" data-tab="drafts">Drafts <span class="tabcount" id="draftsDue" hidden></span></button>
           <button type="button" data-tab="storage">Storage</button>
         </nav>
         <div class="livestrip" id="livestrip" role="status" aria-label="Run state">
@@ -195,22 +195,44 @@
         <!-- DRAFTS -->
         <section id="drafts" class="tab" aria-label="Drafts">
           <div class="draftgrid">
-            <aside class="acctpanel">
-              <h2>Connected accounts</h2>
-              <ul id="accounts" class="accounts"></ul>
-              <div class="connect">
-                <a class="btn btn--quiet" href="/connect/google">Connect Gmail</a>
-                <a class="btn btn--quiet" href="/connect/microsoft">Connect Outlook</a>
-              </div>
-            </aside>
+            <div class="draftside">
+              <aside class="acctpanel">
+                <h2>Connected accounts</h2>
+                <ul id="accounts" class="accounts"></ul>
+                <div class="connect">
+                  <a class="btn btn--quiet" href="/connect/google" id="connectGoogle">Connect Gmail</a>
+                  <a class="btn btn--quiet" href="/connect/microsoft" id="connectMicrosoft">Connect Outlook</a>
+                </div>
+                <p class="connect-note" id="connectNote" hidden></p>
+              </aside>
+              <section class="remindpanel" aria-labelledby="remindHead">
+                <div class="remindhead">
+                  <h2 id="remindHead">Waiting in Drafts</h2>
+                  <button id="remindCheck" class="btn btn--quiet btn--sm" type="button">Check now</button>
+                </div>
+                <p class="remind-sub" id="remindSub">Drafts made here stay unsent until you review and send them yourself.</p>
+                <ul id="remindList" class="remindlist"></ul>
+              </section>
+            </div>
             <div class="composepanel">
               <h2>Compose</h2>
+              <div class="tplbar">
+                <label class="tplfield">Template
+                  <select id="tplSelect"><option value="">No template</option></select>
+                </label>
+                <label class="tplfield">Template name<input id="tplName" type="text" maxlength="80" placeholder="Name it to save" /></label>
+                <div class="tplacts">
+                  <button id="tplSave" class="btn btn--quiet btn--sm" type="button">Save as template</button>
+                  <button id="tplDelete" class="btn btn--quiet btn--sm" type="button" disabled>Delete</button>
+                </div>
+              </div>
               <label>Subject<input id="subject" type="text" /></label>
               <label>Body</label>
               <div id="editor"></div>
               <label>Recipients<textarea id="recipients" rows="4" placeholder="one per line or comma-separated"></textarea></label>
               <div class="actions">
                 <button id="create" class="btn btn--primary" type="button">Create drafts</button>
+                <span class="draft-note">Drafts only. Nothing is sent from here.</span>
               </div>
               <pre id="draftResult" class="result" hidden></pre>
             </div>
