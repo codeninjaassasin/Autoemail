@@ -106,18 +106,19 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--color-focus); ou
 }
 
 /* ---------- Telemetry: one surface, cut by 1px seams ---------- */
-.tracerwrap { flex: 0 0 auto; }
-.tracer {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+/* The wrapper is the panel; the grid sits 1px past its right and bottom edges, so each cell's own
+   right and bottom border is a seam, the outermost ones fall under the clip, and a short last row
+   still closes its last cell and the cells above the empty space. */
+.tracerwrap {
+  flex: 0 0 auto;
   background: var(--color-paper-2);
   border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); overflow: hidden;
 }
-/* Seams drawn by each cell on its left and top (later cells paint over earlier ones; the outer edge clips),
-   so space left after the last cell is panel, not a filled box. */
-.tracer > * { background: var(--color-paper-2); box-shadow: -1px 0 0 var(--color-rule), 0 -1px 0 var(--color-rule); }
+.tracer { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); margin: 0 -1px -1px 0; }
+.tracer > * { background: var(--color-paper-2); border-right: var(--rule-hair) solid var(--color-rule); border-bottom: var(--rule-hair) solid var(--color-rule); }
 .tracer .stat { display: flex; flex-direction: column; justify-content: space-between; gap: var(--space-xs); padding: var(--space-sm) var(--space-md); min-width: 0; }
 .tracer .k { font-size: var(--text-xs); color: var(--color-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tracer .v { font-size: var(--text-lg); font-weight: 500; line-height: 1.1; color: var(--color-ink); overflow-wrap: anywhere; }
+.tracer .v { font-size: var(--text-lg); font-weight: 500; line-height: 1.1; color: var(--color-ink); overflow-wrap: break-word; }
 /* The lead reading: the run's state, set large in the display face. */
 .tracer .stat-lead { grid-row: span 1; }
 .tracer .stat-lead .v { font-family: var(--font-display); font-size: var(--text-2xl); letter-spacing: var(--tracking-display); line-height: 1; color: var(--color-ink-2); }
@@ -126,7 +127,8 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--color-focus); ou
 .tracer.compact { grid-template-columns: minmax(150px, 1.3fr) repeat(6, minmax(0, 1fr)) minmax(96px, auto); }
 .tracer.compact .stat:nth-child(n + 8) { display: none; }
 .tracer-toggle {
-  border: 0; padding: var(--space-sm) var(--space-md); cursor: pointer; text-align: left;
+  border: 0; border-right: var(--rule-hair) solid var(--color-rule); border-bottom: var(--rule-hair) solid var(--color-rule);
+  padding: var(--space-sm) var(--space-md); cursor: pointer; text-align: left;
   color: var(--color-ink-2); font: 500 var(--text-xs)/1.2 var(--font-body);
   transition: background-color var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out);
 }
