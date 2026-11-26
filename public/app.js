@@ -1944,7 +1944,10 @@ document.getElementById('refreshProxies').addEventListener('click', async (e) =>
     const r = await (await fetch('/api/proxies/refresh', { method: 'POST' })).json();
     if (r.ok) {
       const p = r.pruned ? `Kept ${r.pruned.kept} verified, removed ${r.pruned.removed} unverified.\n` : '';
-      alert(`${p}Gathered ${r.found} proxies, ${r.added} new.\nStored ${r.stats.stored}. New proxies are verified by use while scraping.`);
+      const a = r.archives && r.archives.removed
+        ? `Deleted ${r.archives.removed} archived pool file(s) older than 1 day (${Math.round(r.archives.freedBytes / 1048576)} MB).\n`
+        : '';
+      alert(`${p}${a}Gathered ${r.found} proxies, ${r.added} new.\nStored ${r.stats.stored}. New proxies are verified by use while scraping.`);
     }
     else alert('Refresh failed: ' + r.error);
   } catch (err) {

@@ -356,9 +356,9 @@ app.post('/api/refresh/stop', (req, res) => {
 app.post('/api/proxies/refresh', async (req, res) => {
   try {
     const { refreshPool } = require('./scraper/proxyRefresh');
-    const { mode, pruned, found, added, perSource } = await refreshPool(req.query.mode || 'keep-verified');
+    const { mode, pruned, archives, found, added, perSource } = await refreshPool(req.query.mode || 'keep-verified');
     scraper.addProxies(found.map((p) => p.server), { reset: mode !== 'add' }); // feed a running scrape now
-    res.json({ ok: true, mode, pruned, found: found.length, added, perSource, stats: proxies.stats() });
+    res.json({ ok: true, mode, pruned, archives, found: found.length, added, perSource, stats: proxies.stats() });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
