@@ -63,7 +63,7 @@ async function createDraft(account, { to, subject, bodyHtml, bodyText }) {
     userId: 'me',
     requestBody: { message: { raw } },
   });
-  return { draftId: res.data.id, messageId: res.data.message?.id || null };
+  return { draftId: res.data.id, messageId: res.data.message?.id || null, threadId: res.data.message?.threadId || null };
 }
 
 // Every draft in the account's Drafts folder: Map draftId -> { messageId }.
@@ -86,4 +86,60 @@ function draftLink(account, entry) {
   return entry.messageId ? `${box}#drafts?compose=${entry.messageId}` : `${box}#drafts`;
 }
 
-module.exports = { createDraft, listDrafts, draftLink, buildRaw };
+// --- Replies (needs the gmail.metadata scope: headers only, no bodies) ---
+const METADATA = 'https://www.googleapis.com/auth/gmail.metadata';
+function canReadReplies(account) {
+  return String(account.tokens?.scope || '').split(/\s+/).includes(METADATA);
+}
+
+function header(msg, name) {
+  const h = (msg.payload?.headers || []).find((x) => x.name.toLowerCase() === name.toLowerCase());
+  return h ? h.value : '';
+}
+function shape(msg) {
+  return {
+    id: msg.id,
+    threadId: msg.threadId,
+    labelIds: msg.labelIds || [],
+    from: header(msg, 'From'),
+    subject: header(msg, 'Subject'),
+    at: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : null,
+    snippet: msg.snippet || '',
+  };
+}
+const META = { format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] };
+
+// The mailbox's current history id: replies are looked for after it.
+async function historyId(account) {
+  const gmail = await api(account);
+  return (await gmail.users.getProfile({ userId: 'me' })).data.historyId;
+}
+
+// Messages added since `startHistoryId`: { historyId, added: [{ id, threadId }] }.
+// A 404 means the id is too old (about a week); the caller starts over.
+async function historySince(account, startHistoryId) {
+  const gmail = await api(account);
+  const added = [];
+  let pageToken;
+  let latest = startHistoryId;
+  do {
+    const res = await gmail.users.history.list({ userId: 'me', startHistoryId, historyTypes: ['messageAdded'], maxResults: 500, pageToken });
+    for (const h of res.data.history || [])
+      for (const m of h.messagesAdded || []) added.push({ id: m.message.id, threadId: m.message.threadId });
+    latest = res.data.historyId || latest;
+    pageToken = res.data.nextPageToken;
+  } while (pageToken);
+  return { historyId: latest, added };
+}
+
+async function getMessage(account, id) {
+  const gmail = await api(account);
+  return shape((await gmail.users.messages.get({ userId: 'me', id, ...META })).data);
+}
+
+async function threadMessages(account, threadId) {
+  const gmail = await api(account);
+  return ((await gmail.users.threads.get({ userId: 'me', id: threadId, ...META })).data.messages || []).map(shape);
+}
+
+module.exports = { createDraft, listDrafts, draftLink, buildRaw, canReadReplies, historyId, historySince, getMessage, threadMessages };

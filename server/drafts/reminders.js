@@ -7,6 +7,7 @@
 const accounts = require('../accounts');
 const contacts = require('../contacts');
 const { values } = require('./merge');
+const replies = require('./replies');
 const log = require('./log');
 const gmail = require('./gmail');
 const graph = require('./graph');
@@ -69,10 +70,12 @@ function summary() {
   const wanted = new Set(log.all().map((e) => e.contactId).filter(Boolean));
   const posts = new Map();
   if (wanted.size) for (const c of contacts.list()) if (wanted.has(c.id)) posts.set(c.id, c);
+  const answered = replies.byLog();
   const row = (e) => {
     const account = byId.get(e.accountId);
     const post = e.contactId ? posts.get(e.contactId) : null;
     return {
+      replies: answered.get(e.id) || null,
       post: post ? postInfo(post) : null,
       id: e.id,
       to: e.to,
@@ -93,7 +96,7 @@ function summary() {
   const done = mine
     .filter((e) => e.status !== 'waiting')
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, 50)
+    .filter((e, i) => i < 50 || answered.has(e.id)) // a draft with a reply always stays listed
     .map(row);
   const errors = Object.entries(state.errors)
     .filter(([id]) => byId.has(id))

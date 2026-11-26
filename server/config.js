@@ -14,7 +14,9 @@ const config = {
     clientId: process.env.GOOGLE_CLIENT_ID || '',
     clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
     redirectUri: `${base}/oauth/google/callback`,
-    scope: ['https://www.googleapis.com/auth/gmail.compose'],
+    // compose: create and list drafts. metadata: headers only (sender, subject,
+    // date) to notice replies to sent drafts; it cannot read message bodies.
+    scope: ['https://www.googleapis.com/auth/gmail.compose', 'https://www.googleapis.com/auth/gmail.metadata'],
   },
   microsoft: {
     clientId: process.env.MICROSOFT_CLIENT_ID || '',
