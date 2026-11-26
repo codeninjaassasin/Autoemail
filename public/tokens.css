@@ -4,39 +4,46 @@
   --text-xs: 0.75rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.2rem; --text-xl: 1.44rem; --text-2xl: 1.728rem; --text-3xl: 2.074rem;
   --text-display-s: 1.44rem; --text-display: 1.728rem; --text-section: 1.2rem; --text-title: 1rem; --text-lead: 1rem;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
-  --color-error: oklch(72% 0.15 27); --color-success: oklch(76% 0.13 150);
+  --color-error: oklch(70% 0.18 22); --color-success: oklch(80% 0.15 155);
   --container: 1440px; --gutter: 64px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
   --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
-  --color-paper: oklch(17% 0.008 250); --color-paper-2: oklch(21% 0.009 250); --color-paper-3: oklch(13.5% 0.007 250);
-  --color-ink: oklch(95% 0.005 250); --color-ink-2: oklch(83% 0.008 250); --color-muted: oklch(71% 0.01 250);
-  --color-rule: oklch(31% 0.01 250); --color-rule-2: oklch(42% 0.012 250);
-  --color-accent: oklch(82% 0.15 80); --color-accent-ink: oklch(18% 0.04 75); --color-accent-soft: oklch(29% 0.05 80); --color-focus: oklch(82% 0.15 80);
-  --color-cool: oklch(77% 0.12 245); --color-cool-soft: oklch(29% 0.05 245);
-  --color-ok: oklch(76% 0.15 150); --color-ok-soft: oklch(24.5% 0.03 150); --color-bad: oklch(70% 0.17 25); --color-bad-soft: oklch(24.5% 0.035 25);
-  --font-display: "Host Grotesk", ui-sans-serif, system-ui, sans-serif; --font-body: var(--font-display);
+  /* Night mail: a deep postal navy ground, gold for the run and actions, airmail blue for relays, airmail red for flags. */
+  --color-paper: oklch(20.5% 0.035 262); --color-paper-2: oklch(24% 0.04 262); --color-paper-3: oklch(16.5% 0.032 262);
+  --color-ink: oklch(96% 0.01 255); --color-ink-2: oklch(84% 0.02 258); --color-muted: oklch(71% 0.03 260);
+  --color-rule: oklch(31% 0.04 262); --color-rule-2: oklch(42% 0.045 262);
+  --color-accent: oklch(84% 0.15 82); --color-accent-ink: oklch(20% 0.05 70); --color-accent-soft: oklch(31% 0.055 78); --color-focus: oklch(84% 0.15 82);
+  --color-cool: oklch(77% 0.12 258); --color-cool-soft: oklch(30% 0.07 260);
+  --color-ok: oklch(80% 0.15 155); --color-ok-soft: oklch(29% 0.05 160); --color-bad: oklch(71% 0.18 22); --color-bad-soft: oklch(28.5% 0.065 20);
+  /* The airmail edge (top of the bar): red, paper, blue, paper. */
+  --air-red: oklch(63% 0.2 25); --air-blue: oklch(58% 0.17 262); --air-paper: oklch(94% 0.012 90);
+  --font-display: "Bricolage Grotesque", "Host Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Host Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-outlier: "Atkinson Hyperlegible Mono", ui-monospace, monospace;
-  --radius-card: 10px; --radius-pill: 6px; --rule-hair: 1px;
-  --shadow-card: none;
-  --tracking-display: -0.03em; --display-weight: 500;
+  --radius-card: 14px; --radius-pill: 9px; --radius-chip: 6px; --rule-hair: 1px;
+  --shadow-card: inset 0 1px 0 oklch(100% 0 0 / 0.045), 0 22px 44px -30px oklch(5% 0.03 262 / 0.9);
+  --tracking-display: -0.03em; --display-weight: 600;
 }
 /* App-screen additions: control sizes, field edge, and the paper colourway for light mode. */
 :root {
   --control-h: 34px; --control-h-sm: 28px; --icon-btn: 26px;
-  --color-field-edge: oklch(52% 0.012 250);
-  --color-toast-shadow: oklch(8% 0.01 250 / 0.45);
+  --color-field-edge: oklch(46% 0.04 262);
+  --color-toast-shadow: oklch(6% 0.03 262 / 0.6);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-mode="dark"]) {
     color-scheme: light;
-    --color-paper: oklch(96.5% 0.006 85); --color-paper-2: oklch(99% 0.004 85); --color-paper-3: oklch(93.5% 0.007 85);
-    --color-ink: oklch(19% 0.01 60); --color-ink-2: oklch(33% 0.01 60); --color-muted: oklch(47% 0.012 60);
-    --color-rule: oklch(88% 0.008 70); --color-rule-2: oklch(77% 0.01 70);
-    --color-accent: oklch(54% 0.14 70); --color-accent-ink: oklch(98.5% 0.008 85); --color-accent-soft: oklch(93% 0.045 80); --color-focus: oklch(54% 0.14 70);
-    --color-cool: oklch(48% 0.14 250); --color-cool-soft: oklch(93.5% 0.03 245);
-    --color-ok: oklch(47% 0.12 150); --color-ok-soft: oklch(94% 0.03 150); --color-bad: oklch(51% 0.17 25); --color-bad-soft: oklch(94.5% 0.03 25);
-    --color-error: oklch(51% 0.17 25); --color-success: oklch(47% 0.12 150);
-    --color-field-edge: oklch(58% 0.012 60);
-    --color-toast-shadow: oklch(20% 0.01 60 / 0.14);
+    --color-paper: oklch(96.8% 0.008 255); --color-paper-2: oklch(99.6% 0.003 255); --color-paper-3: oklch(93.8% 0.013 255);
+    --color-ink: oklch(22% 0.04 262); --color-ink-2: oklch(35% 0.04 262); --color-muted: oklch(48% 0.03 262);
+    --color-rule: oklch(89.5% 0.015 258); --color-rule-2: oklch(79% 0.02 258);
+    --color-accent: oklch(54% 0.14 70); --color-accent-ink: oklch(98.5% 0.008 85); --color-accent-soft: oklch(93.5% 0.045 82); --color-focus: oklch(54% 0.14 70);
+    --color-cool: oklch(47% 0.16 262); --color-cool-soft: oklch(94% 0.03 258);
+    --color-ok: oklch(47% 0.12 150); --color-ok-soft: oklch(94% 0.03 150); --color-bad: oklch(51% 0.18 25); --color-bad-soft: oklch(94.5% 0.03 25);
+    --color-error: oklch(51% 0.18 25); --color-success: oklch(47% 0.12 150);
+    --air-paper: oklch(99% 0.004 90);
+    --color-field-edge: oklch(64% 0.03 262);
+    --color-toast-shadow: oklch(25% 0.04 262 / 0.16);
+    --shadow-card: 0 1px 0 oklch(100% 0 0 / 0.8) inset, 0 18px 36px -28px oklch(25% 0.05 262 / 0.35);
   }
 }
