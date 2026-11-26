@@ -11,28 +11,30 @@ document.querySelectorAll('.tabs button').forEach((btn) => {
   });
 });
 
-// ---------- Quill ----------
-const quill = new Quill('#editor', { theme: 'snow' });
-
 // ---------- Accounts ----------
+var accountsList = []; // var: read by the template dialog
 async function loadAccounts() {
-  const list = await (await fetch('/api/accounts')).json();
+  try {
+    accountsList = await (await fetch('/api/accounts')).json();
+  } catch {
+    return;
+  }
   const ul = document.getElementById('accounts');
   ul.innerHTML = '';
-  if (!list.length) {
+  if (!accountsList.length) {
     ul.innerHTML = '<li class="sub">No accounts connected yet.</li>';
     return;
   }
-  for (const a of list) {
+  for (const a of accountsList) {
     const li = document.createElement('li');
-    li.innerHTML = `<input type="checkbox" value="${esc(a.id)}" checked aria-label="Use ${esc(a.emailAddress)}" />
-      <span class="provider">${a.provider === 'google' ? 'Gmail' : 'Outlook'}</span><span class="acct-email">${esc(a.emailAddress)}</span>
+    li.innerHTML = `<span class="provider">${a.provider === 'google' ? 'Gmail' : 'Outlook'}</span><span class="acct-email">${esc(a.emailAddress)}</span>
       <a href="#" class="del" data-id="${esc(a.id)}">remove</a>`;
     ul.appendChild(li);
   }
   ul.querySelectorAll('.del').forEach((el) =>
     el.addEventListener('click', async (e) => {
       e.preventDefault();
+      if (!confirm('Remove this account? Its drafts already in Gmail stay there.')) return;
       await fetch(`/api/accounts/${el.dataset.id}`, { method: 'DELETE' });
       loadAccounts();
       loadReminders();
@@ -77,216 +79,6 @@ loadAccounts();
   note.hidden = !lines.length;
 })();
 
-// ---------- Templates ----------
-const tplSelect = document.getElementById('tplSelect');
-const tplName = document.getElementById('tplName');
-const tplSave = document.getElementById('tplSave');
-const tplDelete = document.getElementById('tplDelete');
-const subjectEl = document.getElementById('subject');
-let templatesList = [];
-let loadedCompose = { subject: '', body: '' }; // what the editor held after the last template load
-
-const editorBody = () => (quill.getText().trim() ? quill.root.innerHTML : '');
-const composeDirty = () =>
-  (subjectEl.value || editorBody()) && (subjectEl.value !== loadedCompose.subject || editorBody() !== loadedCompose.body);
-
-function syncTplButtons() {
-  const sel = tplSelect.value;
-  tplDelete.disabled = !sel;
-  tplSave.textContent = sel ? 'Save changes' : 'Save as template';
-  tplSave.title = sel ? 'Overwrite this template with the subject and body below' : 'Save the subject and body below as a new template';
-}
-
-async function loadTemplates(selectId = tplSelect.value) {
-  try {
-    templatesList = await (await fetch('/api/templates')).json();
-  } catch {
-    templatesList = [];
-  }
-  tplSelect.innerHTML =
-    '<option value="">No template</option>' +
-    templatesList.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
-  tplSelect.value = templatesList.some((t) => t.id === selectId) ? selectId : '';
-  syncTplButtons();
-  if (typeof renderAuto === 'function' && autoData) renderAuto(autoData);
-}
-loadTemplates('');
-
-let tplPrev = '';
-tplSelect.addEventListener('focus', () => (tplPrev = tplSelect.value));
-tplSelect.addEventListener('change', () => {
-  const t = templatesList.find((x) => x.id === tplSelect.value);
-  if (t) {
-    if (composeDirty() && !confirm('Replace the subject and body you have written with this template?')) {
-      tplSelect.value = tplPrev;
-      return;
-    }
-    tplName.value = t.name;
-    subjectEl.value = t.subject;
-    quill.setContents([]);
-    if (t.bodyHtml) quill.clipboard.dangerouslyPasteHTML(t.bodyHtml);
-    loadedCompose = { subject: subjectEl.value, body: editorBody() };
-  } else {
-    tplName.value = ''; // keep the text: "Save as template" makes a new one from it
-  }
-  tplPrev = tplSelect.value;
-  syncTplButtons();
-});
-
-tplSave.addEventListener('click', async () => {
-  const name = tplName.value.trim();
-  if (!name) {
-    showToast({ kicker: 'Template not saved', title: 'Give the template a name', body: 'Type a name in Template name, then save.', tone: 'bad' });
-    tplName.focus();
-    return;
-  }
-  const id = tplSelect.value;
-  tplSave.disabled = true;
-  try {
-    const r = await fetch(id ? `/api/templates/${encodeURIComponent(id)}` : '/api/templates', {
-      method: id ? 'PUT' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, subject: subjectEl.value, bodyHtml: editorBody() }),
-    });
-    const data = await r.json();
-    if (!data.ok) throw new Error(data.error || 'Could not save the template.');
-    await loadTemplates(data.template.id);
-    tplPrev = tplSelect.value;
-    loadedCompose = { subject: subjectEl.value, body: editorBody() };
-    showToast({ kicker: id ? 'Template updated' : 'Template saved', title: data.template.name, body: 'Pick it from Template next time.' });
-  } catch (err) {
-    showToast({ kicker: 'Template not saved', title: name, body: err.message, tone: 'bad' });
-  } finally {
-    tplSave.disabled = false;
-  }
-});
-
-tplDelete.addEventListener('click', async () => {
-  const t = templatesList.find((x) => x.id === tplSelect.value);
-  const inUse = autoData ? autoData.assignments.filter((a) => a.templateId === (t && t.id)).map((a) => a.email) : [];
-  const warn = inUse.length ? `\n\n${inUse.join(', ')} drafts with it and will stop making automatic drafts.` : '';
-  if (!t || !confirm(`Delete the template "${t.name}"? The subject and body stay in the editor.${warn}`)) return;
-  await fetch(`/api/templates/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
-  tplName.value = '';
-  await loadTemplates('');
-  tplPrev = '';
-  loadAuto();
-  showToast({ kicker: 'Template deleted', title: t.name, body: 'The text below was kept.' });
-});
-
-// ---------- Create drafts (never sends) ----------
-// Recipients come from the scraper: the newest scraped posts with an email, no
-// phone and no draft yet. Each draft is filled from its own post's fields.
-const createBtn = document.getElementById('create');
-const targetSum = document.getElementById('targetSum');
-const draftDays = document.getElementById('draftDays');
-const draftLimit = document.getElementById('draftLimit');
-let readyCount = null;
-let creating = false;
-
-function draftCount() {
-  const max = Number(draftLimit.max) || 100;
-  const want = Math.min(max, Math.max(1, Math.floor(Number(draftLimit.value) || 0)));
-  return readyCount == null ? want : Math.min(want, readyCount);
-}
-
-function paintTargets() {
-  const n = draftCount();
-  const within = draftDays.value === '0' ? '' : ` from the last ${draftDays.options[draftDays.selectedIndex].text}`;
-  if (readyCount == null) targetSum.textContent = 'Counting scraped posts…';
-  else if (!readyCount)
-    targetSum.textContent = `No scraped post${within} is waiting: each needs an email, no phone and no draft yet.`;
-  else
-    targetSum.textContent = `${readyCount.toLocaleString()} scraped post${readyCount === 1 ? '' : 's'}${within} ${readyCount === 1 ? 'has' : 'have'} an email, no phone and no draft yet. The newest ${n.toLocaleString()} get one draft each, to the post's Craigslist relay.`;
-  if (!creating) {
-    createBtn.textContent = readyCount ? `Create ${n.toLocaleString()} draft${n === 1 ? '' : 's'}` : 'Create drafts';
-    createBtn.disabled = readyCount === 0;
-  }
-}
-
-async function loadTargets() {
-  try {
-    const r = await (await fetch(`/api/drafts/ready?days=${encodeURIComponent(draftDays.value)}`)).json();
-    readyCount = r.ready;
-    if (r.max) draftLimit.max = String(r.max);
-  } catch {
-    /* offline: keep the last count */
-  }
-  paintTargets();
-}
-draftDays.addEventListener('change', () => {
-  readyCount = null;
-  paintTargets();
-  loadTargets();
-});
-draftLimit.addEventListener('input', paintTargets);
-loadTargets();
-setInterval(() => {
-  if (!creating) loadTargets();
-}, 30000);
-
-createBtn.addEventListener('click', async () => {
-  const accountIds = [...document.querySelectorAll('#accounts input:checked')].map((c) => c.value);
-  const out = document.getElementById('draftResult');
-  const n = draftCount();
-  if (!accountIds.length) return showToast({ kicker: 'No drafts made', title: 'Tick a mailbox', body: 'Tick at least one connected account on the left.', tone: 'bad' });
-  if (!subjectEl.value.trim()) return showToast({ kicker: 'No drafts made', title: 'Write a subject', body: 'Fields like {{title}} fill from each post.', tone: 'bad' });
-  if (!confirm(`Create ${n} draft${n === 1 ? '' : 's'} for the newest scraped posts with no phone? Nothing is sent: you send each one from Gmail.`)) return;
-  creating = true;
-  createBtn.disabled = true;
-  createBtn.textContent = 'Creating…';
-  out.hidden = false;
-  out.textContent = `Creating ${n} draft${n === 1 ? '' : 's'}…`;
-  try {
-    const data = await (
-      await fetch('/api/drafts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountIds,
-          subject: subjectEl.value,
-          bodyHtml: quill.root.innerHTML,
-          templateId: tplSelect.value || null,
-          limit: n,
-          days: Number(draftDays.value),
-        }),
-      })
-    ).json();
-    if (!data.ok) throw new Error(data.error);
-    const posts = data.results.filter((r) => !r.mailbox);
-    const made = posts.filter((r) => r.ok).length;
-    out.textContent = data.results
-      .map((r) =>
-        r.mailbox
-          ? `ERR mailbox left out of this run — ${r.error}`
-          : `${r.ok ? 'OK ' : 'ERR'} ${r.title || '(untitled)'} → ${r.to}${r.account ? ' via ' + r.account : ''}${r.error ? ' — ' + r.error : ''}`
-      )
-      .join('\n');
-    showToast({
-      kicker: 'Drafts created',
-      title: `${made} of ${posts.length} made`,
-      body: made ? 'They wait in Drafts until you send them.' : 'See the list under the button.',
-      tone: made === posts.length && posts.length === data.results.length ? undefined : 'bad',
-    });
-  } catch (err) {
-    out.textContent = `Error: ${err.message}`;
-  } finally {
-    creating = false;
-    loadTargets();
-    loadReminders();
-    loadAuto();
-  }
-});
-
-// ---------- Draft reminders ----------
-// The server checks each mailbox's Drafts folder every 15 minutes; this lists
-// the drafts made here that are still unsent. Sending is always done by hand.
-const remindList = document.getElementById('remindList');
-const remindSub = document.getElementById('remindSub');
-const remindCheck = document.getElementById('remindCheck');
-const draftsDue = document.getElementById('draftsDue');
-let remindToastShown = false;
-
 function agoText(iso) {
   const m = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000));
   if (m < 1) return 'just now';
@@ -295,6 +87,205 @@ function agoText(iso) {
   const d = Math.floor(m / 1440);
   return d === 1 ? '1 day ago' : `${d} days ago`;
 }
+function clockText(iso) {
+  const d = new Date(iso);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return sameDay ? t : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${t}`;
+}
+
+// ---------- Templates ----------
+// A list, and a dialog to write one (plain multi-line text, kept line for line
+// in the draft) and pick the mailboxes that draft with it.
+const tplList = document.getElementById('tplList');
+const tplDialog = document.getElementById('tplDialog');
+const tplForm = document.getElementById('tplForm');
+const tplTitle = document.getElementById('tplDialogTitle');
+const tplName = document.getElementById('tplName');
+const subjectEl = document.getElementById('subject');
+const tplBody = document.getElementById('tplBody');
+const tplBoxes = document.getElementById('tplBoxes');
+const tplErr = document.getElementById('tplErr');
+const tplDelete = document.getElementById('tplDelete');
+const tplSave = document.getElementById('tplSave');
+var templatesList = []; // var: read by renderAuto, which may run first
+let editingId = null;
+let tplOpened = null; // the dialog's text when it opened, to warn before losing edits
+
+const assignedTo = (templateId) =>
+  autoData ? autoData.mailboxes.filter((m) => m.templateId === templateId) : [];
+
+function renderTemplates() {
+  if (!templatesList.length) {
+    tplList.innerHTML = '<li class="sub">No templates yet. Make one, then tick the mailboxes that draft with it.</li>';
+    return;
+  }
+  tplList.innerHTML = templatesList
+    .map((t) => {
+      const boxes = assignedTo(t.id);
+      const first = (t.body || '').split('\n').find((l) => l.trim()) || '';
+      return `<li>
+        <div class="tpl-main">
+          <span class="tpl-name">${esc(t.name)}</span>
+          <span class="tpl-subj">${esc(t.subject)}</span>
+          <span class="tpl-first">${esc(first)}</span>
+        </div>
+        <div class="tpl-boxes">${
+          boxes.length
+            ? boxes.map((m) => `<span class="tpl-box">${esc(m.email)}</span>`).join('')
+            : '<span class="auto-dim">No mailbox</span>'
+        }</div>
+        <button type="button" class="btn btn--quiet btn--sm tpl-edit" data-id="${esc(t.id)}">Edit</button>
+      </li>`;
+    })
+    .join('');
+}
+
+async function loadTemplates() {
+  try {
+    templatesList = await (await fetch('/api/templates')).json();
+  } catch {
+    return;
+  }
+  renderTemplates();
+  if (autoData) renderAuto(autoData);
+}
+loadTemplates();
+
+const tplSnapshot = () =>
+  JSON.stringify([tplName.value, subjectEl.value, tplBody.value, [...tplBoxes.querySelectorAll('input:checked')].map((c) => c.value)]);
+
+function openTemplate(id) {
+  const t = templatesList.find((x) => x.id === id) || null;
+  editingId = t ? t.id : null;
+  tplTitle.textContent = t ? 'Edit template' : 'New template';
+  tplName.value = t ? t.name : '';
+  subjectEl.value = t ? t.subject : '';
+  tplBody.value = t ? t.body || '' : '';
+  tplDelete.hidden = !t;
+  tplErr.textContent = '';
+  const mailboxes = autoData ? autoData.mailboxes : accountsList.map((a) => ({ accountId: a.id, email: a.emailAddress, templateId: null }));
+  tplBoxes.innerHTML = mailboxes.length
+    ? mailboxes
+        .map((m) => {
+          const other = m.templateId && m.templateId !== editingId ? templatesList.find((x) => x.id === m.templateId) : null;
+          return `<label class="tplbox"><input type="checkbox" value="${esc(m.accountId)}"${t && m.templateId === t.id ? ' checked' : ''} />
+            <span>${esc(m.email)}</span>${other ? `<span class="auto-dim">now uses ${esc(other.name)}</span>` : ''}</label>`;
+        })
+        .join('')
+    : '<p class="dhint">Connect a Gmail account first.</p>';
+  tplOpened = tplSnapshot();
+  lastField = 'body';
+  tplDialog.showModal();
+  tplName.focus();
+}
+
+function closeTemplate(force) {
+  if (!force && tplSnapshot() !== tplOpened && !confirm('Close without saving your changes?')) return;
+  tplDialog.close();
+}
+
+document.getElementById('tplNew').addEventListener('click', () => openTemplate(null));
+tplList.addEventListener('click', (e) => {
+  const b = e.target.closest('.tpl-edit');
+  if (b) openTemplate(b.dataset.id);
+});
+document.getElementById('tplCancel').addEventListener('click', () => closeTemplate(false));
+tplDialog.addEventListener('cancel', (e) => {
+  e.preventDefault(); // Escape: ask first if something changed
+  closeTemplate(false);
+});
+
+tplForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  tplErr.textContent = '';
+  const payload = { name: tplName.value.trim(), subject: subjectEl.value, body: tplBody.value };
+  if (!payload.name) return (tplErr.textContent = 'Give the template a name.'), tplName.focus();
+  if (!payload.subject.trim()) return (tplErr.textContent = 'Write a subject.'), subjectEl.focus();
+  if (!payload.body.trim()) return (tplErr.textContent = 'Write the email body.'), tplBody.focus();
+  tplSave.disabled = true;
+  try {
+    const r = await fetch(editingId ? `/api/templates/${encodeURIComponent(editingId)}` : '/api/templates', {
+      method: editingId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || 'Could not save the template.');
+    const id = data.template.id;
+    // Mailboxes: ticked ones use this template; unticked ones that used it stop.
+    const assignments = {};
+    tplBoxes.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+      const m = autoData && autoData.mailboxes.find((x) => x.accountId === cb.value);
+      if (cb.checked) assignments[cb.value] = id;
+      else if (m && m.templateId === id) assignments[cb.value] = null;
+    });
+    await loadTemplates();
+    if (Object.keys(assignments).length) await saveAuto({ assignments });
+    renderTemplates();
+    tplDialog.close();
+    showToast({ kicker: editingId ? 'Template updated' : 'Template saved', title: data.template.name, body: 'Drafts from now on use this text.' });
+  } catch (err) {
+    tplErr.textContent = err.message;
+  } finally {
+    tplSave.disabled = false;
+  }
+});
+
+tplDelete.addEventListener('click', async () => {
+  const t = templatesList.find((x) => x.id === editingId);
+  if (!t) return;
+  const inUse = assignedTo(t.id).map((m) => m.email);
+  const warn = inUse.length ? `\n\n${inUse.join(', ')} will stop making automatic drafts.` : '';
+  if (!confirm(`Delete the template "${t.name}"?${warn}`)) return;
+  await fetch(`/api/templates/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
+  tplDialog.close();
+  await loadTemplates();
+  loadAuto();
+  showToast({ kicker: 'Template deleted', title: t.name, body: inUse.length ? 'Its mailboxes have no template now.' : 'It was not in use.' });
+});
+
+// Fields: click to insert where the cursor was, in the subject or the body.
+const FIELD_NAMES = ['title', 'city', 'state', 'category', 'link', 'posted'];
+const FIELD_HELP = {
+  title: 'Post title, without the category Craigslist adds',
+  city: 'City of the area, e.g. San Diego',
+  state: 'State, e.g. CA',
+  category: 'Category name, e.g. resumes',
+  link: 'Link to the post',
+  posted: 'Posted date, e.g. Nov 25',
+};
+let lastField = 'body';
+subjectEl.addEventListener('focus', () => (lastField = 'subject'));
+tplBody.addEventListener('focus', () => (lastField = 'body'));
+const fieldBar = document.getElementById('fieldBar');
+fieldBar.insertAdjacentHTML(
+  'beforeend',
+  FIELD_NAMES.map((f) => `<button type="button" class="field-chip" data-field="${f}" title="${FIELD_HELP[f]}">{{${f}}}</button>`).join('')
+);
+fieldBar.addEventListener('mousedown', (e) => {
+  if (e.target.closest('.field-chip')) e.preventDefault(); // keep the cursor where it was
+});
+fieldBar.addEventListener('click', (e) => {
+  const chip = e.target.closest('.field-chip');
+  if (!chip) return;
+  const token = `{{${chip.dataset.field}}}`;
+  const el = lastField === 'subject' ? subjectEl : tplBody;
+  const a = el.selectionStart ?? el.value.length;
+  const b = el.selectionEnd ?? a;
+  el.value = el.value.slice(0, a) + token + el.value.slice(b);
+  el.focus();
+  el.setSelectionRange(a + token.length, a + token.length);
+});
+
+// ---------- Drafted emails ----------
+// Every draft the app made: still in Drafts (waiting for you to send it), or
+// gone from Drafts (you sent or deleted it). The server checks every 15 minutes.
+const remindList = document.getElementById('remindList');
+const remindSub = document.getElementById('remindSub');
+const remindCheck = document.getElementById('remindCheck');
+const draftsDue = document.getElementById('draftsDue');
+let remindToastShown = false;
 
 function renderReminders(r) {
   const n = r.waiting.length;
@@ -304,9 +295,7 @@ function renderReminders(r) {
 
   remindSub.textContent = r.checking
     ? 'Checking the Drafts folders…'
-    : r.checkedAt
-      ? `Checked ${agoText(r.checkedAt)}; checks again every 15 minutes. Review, edit and send each one yourself.`
-      : 'Drafts made here stay unsent until you review and send them yourself.';
+    : `${n ? `${n} waiting to be sent from Gmail.` : 'Nothing waiting to be sent.'} ${r.checkedAt ? `Checked ${agoText(r.checkedAt)}.` : ''}`;
 
   const items = r.errors.map(
     (e) => `<li class="remind-err">
@@ -315,23 +304,24 @@ function renderReminders(r) {
       <a class="btn btn--quiet btn--sm" href="/connect/${e.provider === 'google' ? 'google' : 'microsoft'}">Connect again</a>
     </li>`
   );
-  for (const d of r.waiting) {
-    const old = Date.now() - Date.parse(d.createdAt) > 86400000;
-    items.push(`<li class="${old ? 'is-old' : ''}">
-      <span class="r-to">${esc(d.to)}</span>
+  const row = (d, done) => {
+    const old = !done && Date.now() - Date.parse(d.createdAt) > 86400000;
+    return `<li class="${done ? 'is-done' : old ? 'is-old' : ''}">
       <span class="r-subj">${esc(d.subject || '(no subject)')}</span>
-      <span class="r-meta">In ${esc(d.account)}, made ${agoText(d.createdAt)}</span>
-      <a class="btn btn--quiet btn--sm" href="${esc(d.link)}" target="_blank" rel="noopener">Open in ${d.provider === 'google' ? 'Gmail' : 'Outlook'}</a>
-    </li>`);
-  }
-  remindList.innerHTML = items.length ? items.join('') : '<li class="sub">Nothing waiting. Every draft made here has been sent or deleted.</li>';
+      <span class="r-to">${esc(d.to)}</span>
+      <span class="r-meta">${esc(d.account)}, ${done ? 'sent or deleted' : 'waiting'}, made ${agoText(d.createdAt)}</span>
+    </li>`;
+  };
+  for (const d of r.waiting) items.push(row(d, false));
+  for (const d of r.done || []) items.push(row(d, true));
+  remindList.innerHTML = items.length ? items.join('') : '<li class="sub">No drafts made yet.</li>';
 
   if (n && !remindToastShown) {
     remindToastShown = true;
     showToast({
       kicker: 'Reminder',
       title: `${n} draft${n === 1 ? '' : 's'} waiting to be sent`,
-      body: 'Open the Drafts tab, make each one right, and send it yourself.',
+      body: 'Open each one in Gmail, make it right, and send it yourself.',
     });
   }
 }
@@ -359,87 +349,97 @@ remindCheck.addEventListener('click', async () => {
 loadReminders();
 setInterval(loadReminders, 60000);
 
-// ---------- Template fields: click to insert where the cursor was ----------
-const FIELD_NAMES = ['title', 'city', 'state', 'category', 'link', 'posted'];
-const FIELD_HELP = {
-  title: 'Post title, without the category Craigslist adds',
-  city: 'City of the area, e.g. San Diego',
-  state: 'State, e.g. CA',
-  category: 'Category name, e.g. resumes',
-  link: 'Link to the post',
-  posted: 'Posted date, e.g. Nov 25',
-};
-let lastField = 'body';
-subjectEl.addEventListener('focus', () => (lastField = 'subject'));
-quill.on('selection-change', (range) => {
-  if (range) lastField = 'body';
-});
-const fieldBar = document.getElementById('fieldBar');
-fieldBar.insertAdjacentHTML(
-  'beforeend',
-  FIELD_NAMES.map((f) => `<button type="button" class="field-chip" data-field="${f}" title="${FIELD_HELP[f]}">{{${f}}}</button>`).join('')
-);
-fieldBar.addEventListener('mousedown', (e) => {
-  if (e.target.closest('.field-chip')) e.preventDefault(); // keep the cursor where it was
-});
-fieldBar.addEventListener('click', (e) => {
-  const chip = e.target.closest('.field-chip');
-  if (!chip) return;
-  const token = `{{${chip.dataset.field}}}`;
-  if (lastField === 'subject') {
-    const a = subjectEl.selectionStart ?? subjectEl.value.length;
-    const b = subjectEl.selectionEnd ?? a;
-    subjectEl.value = subjectEl.value.slice(0, a) + token + subjectEl.value.slice(b);
-    subjectEl.focus();
-    subjectEl.setSelectionRange(a + token.length, a + token.length);
-  } else {
-    const range = quill.getSelection(true) || { index: Math.max(0, quill.getLength() - 1), length: 0 };
-    quill.deleteText(range.index, range.length);
-    quill.insertText(range.index, token, 'user');
-    quill.setSelection(range.index + token.length, 0);
-  }
-});
-
 // ---------- Automatic drafts ----------
-// Server-side: every new no-phone post gets one draft from its mailbox's
-// template; this panel switches it on/off and assigns templates. Never sends.
+// The server picks the mailbox for each new no-phone post under strict
+// per-mailbox limits; this panel shows who is next and why. Never sends.
 const autoRows = document.getElementById('autoRows');
 const autoToggle = document.getElementById('autoToggle');
 const autoState = document.getElementById('autoState');
 const autoStats = document.getElementById('autoStats');
 const autoMsg = document.getElementById('autoMsg');
-var autoData = null; // var: read by loadTemplates, which may resolve first
+const autoNext = document.getElementById('autoNext');
+const autoRecent = document.getElementById('autoRecent');
+const limitDay = document.getElementById('limitDay');
+const limitHour = document.getElementById('limitHour');
+var autoData = null; // var: read by the template code, which may run first
+
+const STATUS_TEXT = {
+  free: 'Has room',
+  rested: 'Has room, waits a turn',
+  'hour-full': 'Hour limit reached',
+  'day-full': '24-hour limit reached',
+  paused: 'Paused',
+  'no-template': 'No template',
+};
+
+function whyText(m) {
+  if (m.status === 'hour-full' || m.status === 'day-full') return `${m.note} Room again at ${clockText(m.freeAt)}.`;
+  if (m.status === 'paused') return `${m.note} Tries again at ${clockText(m.freeAt)}.`;
+  if (m.status === 'free') return m.position === 1 ? 'Gets the next post. The reason is above.' : `Gets a post after number ${m.position - 1}.`;
+  return m.note;
+}
 
 function renderAuto(a) {
   if (!a) return;
   autoData = a;
   autoToggle.setAttribute('aria-pressed', String(a.enabled));
   autoToggle.textContent = a.enabled ? 'Turn off' : 'Turn on';
-  autoState.textContent = a.enabled ? `On since ${new Date(a.enabledAt).toLocaleString()}` : 'Off';
+  autoState.textContent = a.enabled ? `On since ${clockText(a.enabledAt)}` : 'Off';
   autoState.classList.toggle('is-on', a.enabled);
+  if (document.activeElement !== limitDay) limitDay.value = a.limits.perDay;
+  if (document.activeElement !== limitHour) limitHour.value = a.limits.perHour;
 
-  if (!a.assignments.length) {
-    autoRows.innerHTML = '<tr><td colspan="3" class="sub">Connect a Gmail account to assign it a template.</td></tr>';
+  // Who is next, and why.
+  let next;
+  if (a.next) {
+    const post = a.nextPost
+      ? `<p class="np-post">Next post: <span class="np-title">${esc(a.nextPost.title)}</span>, to ${esc(a.nextPost.to)}. ${a.pending > 1 ? `${a.pending - 1} more waiting.` : ''}</p>`
+      : `<p class="np-post">${a.enabled ? 'No post waiting. The next new post without a phone goes here.' : 'Turned off, so no post is drafted.'}</p>`;
+    next = `<p class="np-lead">Next mailbox</p>
+      <p class="np-mail">${esc(a.next.email)}</p>
+      <p class="np-why">Why: ${esc(a.next.reason)}. Template: ${esc(a.next.template)}.</p>${post}`;
+  } else {
+    next = `<p class="np-lead">Next mailbox</p>
+      <p class="np-mail np-none">None right now</p>
+      <p class="np-why">${esc(a.waitReason || '')}${a.freeAt ? ` The first one has room again at ${clockText(a.freeAt)}.` : ''}</p>
+      ${a.pending ? `<p class="np-post">${a.pending} post${a.pending === 1 ? '' : 's'} waiting.</p>` : ''}`;
+  }
+  autoNext.innerHTML = next;
+
+  if (!a.mailboxes.length) {
+    autoRows.innerHTML = '<tr><td colspan="6" class="sub">Connect a Gmail account to assign it a template.</td></tr>';
   } else {
     const opts = (sel) =>
-      '<option value="">Not drafting</option>' +
+      '<option value="">No template</option>' +
       templatesList.map((t) => `<option value="${esc(t.id)}"${t.id === sel ? ' selected' : ''}>${esc(t.name)}</option>`).join('');
-    autoRows.innerHTML = a.assignments
-      .map((s) => {
-        const state = s.paused
-          ? `<span class="auto-bad" title="${esc(s.paused.error)}">Paused: ${esc(s.paused.error)}</span>`
-          : !s.templateId
-            ? '<span class="auto-dim">No template</span>'
-            : a.enabled
-              ? '<span class="auto-on">Drafting</span>'
-              : '<span class="auto-dim">Ready</span>';
-        return `<tr>
-          <td class="auto-mail">${esc(s.email)}</td>
-          <td><select class="auto-tpl" data-account="${esc(s.accountId)}" aria-label="Template for ${esc(s.email)}">${opts(s.templateId)}</select></td>
-          <td>${state}</td></tr>`;
+    const rows = [...a.mailboxes].sort((x, y) => (x.position || 99) - (y.position || 99) || x.email.localeCompare(y.email));
+    autoRows.innerHTML = rows
+      .map((m) => {
+        const tone = m.position === 1 ? 'auto-on' : m.status === 'paused' ? 'auto-bad' : m.position ? '' : 'auto-dim';
+        return `<tr class="${m.position === 1 ? 'is-next' : ''}">
+          <td class="auto-turn" data-label="Turn">${m.position ? (m.position === 1 ? 'Next' : m.position) : 'Out'}</td>
+          <td class="auto-mail">${esc(m.email)}</td>
+          <td><select class="auto-tpl" data-account="${esc(m.accountId)}" aria-label="Template for ${esc(m.email)}">${opts(m.templateId)}</select></td>
+          <td class="auto-num" data-label="Last hour">${m.hour} of ${a.limits.perHour}</td>
+          <td class="auto-num" data-label="Last 24 h">${m.day} of ${a.limits.perDay}</td>
+          <td class="auto-why"><span class="${tone}">${STATUS_TEXT[m.status] || ''}</span><span class="auto-note">${esc(whyText(m))}</span></td>
+        </tr>`;
       })
       .join('');
   }
+
+  autoRecent.innerHTML = a.recent.length
+    ? a.recent
+        .slice(0, 10)
+        .map(
+          (d) => `<li class="${d.ok ? '' : 'is-bad'}">
+          <span class="rc-when">${clockText(d.at)}</span>
+          <span class="rc-what">${esc(d.email)} ${d.ok ? 'drafted' : 'failed on'} <span class="rc-title">${esc(d.title || '(untitled)')}</span></span>
+          <span class="rc-why">${d.ok ? 'Why: ' + esc(d.reason) : esc(d.error || '')}</span>
+        </li>`
+        )
+        .join('')
+    : '<li class="sub">No choices yet. Each draft adds a line here with the reason its mailbox was picked.</li>';
 
   const stat = (k, v) => `<div><dt>${k}</dt><dd>${v}</dd></div>`;
   autoStats.innerHTML =
@@ -449,15 +449,13 @@ function renderAuto(a) {
     stat('Last draft', a.lastDraftAt ? agoText(a.lastDraftAt) : 'none yet');
 
   autoMsg.classList.toggle('is-bad', false);
-  if (a.enabled && !a.senders) {
-    autoMsg.textContent = 'Nothing will be drafted until a mailbox has a template.';
-    autoMsg.classList.add('is-bad');
-  } else if (a.lastError && Date.now() - Date.parse(a.lastError.at) < 6 * 3600000) {
+  if (a.lastError && Date.now() - Date.parse(a.lastError.at) < 6 * 3600000) {
     autoMsg.textContent = `Last problem, ${agoText(a.lastError.at)}, in ${a.lastError.account}: ${a.lastError.error}`;
     autoMsg.classList.add('is-bad');
   } else {
     autoMsg.textContent = '';
   }
+  renderTemplates();
 }
 
 async function loadAuto() {
@@ -485,7 +483,7 @@ autoToggle.addEventListener('click', async () => {
   if (
     on &&
     !confirm(
-      'Turn on automatic drafts?\n\nFrom now on, every newly scraped post with an email and no phone gets a draft in the Gmail its template is assigned to. Posts already in the list are not drafted. Nothing is ever sent.'
+      `Turn on automatic drafts?\n\nFrom now on, every newly scraped post with an email and no phone gets a draft, in the mailbox the rules pick (at most ${limitDay.value} per 24 hours and ${limitHour.value} per hour each). Posts already in the list are not drafted. Nothing is ever sent.`
     )
   )
     return;
@@ -495,7 +493,7 @@ autoToggle.addEventListener('click', async () => {
     showToast({
       kicker: on ? 'Automatic drafts on' : 'Automatic drafts off',
       title: on ? 'New no-phone posts will be drafted' : 'No new drafts will be made',
-      body: on ? (a.senders ? 'Drafts wait in Gmail for you to send.' : 'Assign a template to a mailbox to start.') : 'Drafts already made stay in Gmail.',
+      body: on ? (a.next ? `Next mailbox: ${a.next.email}.` : a.waitReason || '') : 'Drafts already made stay in Gmail.',
     });
   } catch (err) {
     showToast({ kicker: 'Not changed', title: 'Automatic drafts', body: err.message, tone: 'bad' });
@@ -504,6 +502,22 @@ autoToggle.addEventListener('click', async () => {
   }
 });
 
+async function saveLimits() {
+  const perDay = Number(limitDay.value);
+  const perHour = Number(limitHour.value);
+  if (!autoData || (perDay === autoData.limits.perDay && perHour === autoData.limits.perHour)) return;
+  try {
+    await saveAuto({ limits: { perDay, perHour } });
+    showToast({ kicker: 'Limits saved', title: `${perDay} per 24 hours, ${perHour} per hour`, body: 'For each mailbox, from now on.' });
+  } catch (err) {
+    showToast({ kicker: 'Limits not saved', title: 'Check the numbers', body: err.message, tone: 'bad' });
+    limitDay.value = autoData.limits.perDay;
+    limitHour.value = autoData.limits.perHour;
+  }
+}
+limitDay.addEventListener('change', saveLimits);
+limitHour.addEventListener('change', saveLimits);
+
 autoRows.addEventListener('change', async (e) => {
   const sel = e.target.closest('.auto-tpl');
   if (!sel) return;
@@ -511,13 +525,12 @@ autoRows.addEventListener('change', async (e) => {
   try {
     await saveAuto({ assignments: { [sel.dataset.account]: sel.value || null } });
     const name = sel.value ? sel.options[sel.selectedIndex].text : null;
-    showToast({ kicker: 'Template assigned', title: name || 'Not drafting', body: name ? 'This mailbox drafts with it.' : 'This mailbox makes no automatic drafts.' });
+    showToast({ kicker: 'Template assigned', title: name || 'No template', body: name ? 'This mailbox drafts with it.' : 'This mailbox makes no automatic drafts.' });
   } catch (err) {
     showToast({ kicker: 'Not assigned', title: 'Template', body: err.message, tone: 'bad' });
     loadAuto();
   }
 });
-
 loadAuto();
 setInterval(loadAuto, 30000);
 

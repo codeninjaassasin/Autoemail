@@ -58,22 +58,30 @@ function check() {
 
 function summary() {
   const byId = new Map(accounts.all().map((a) => [a.id, a]));
-  const waiting = log
-    .waiting()
-    .filter((e) => byId.has(e.accountId))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .map((e) => {
-      const account = byId.get(e.accountId);
-      return {
-        id: e.id,
-        to: e.to,
-        subject: e.subject,
-        account: account.emailAddress,
-        provider: account.provider,
-        createdAt: e.createdAt,
-        link: provider(account).draftLink(account, e),
-      };
-    });
+  const row = (e) => {
+    const account = byId.get(e.accountId);
+    return {
+      id: e.id,
+      to: e.to,
+      subject: e.subject,
+      account: account.emailAddress,
+      provider: account.provider,
+      createdAt: e.createdAt,
+      status: e.status,
+      goneAt: e.goneAt || null,
+    };
+  };
+  const mine = log.all().filter((e) => byId.has(e.accountId));
+  const waiting = mine
+    .filter((e) => e.status === 'waiting')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map(row);
+  // Drafts that left the Drafts folder (sent or deleted by you), newest first.
+  const done = mine
+    .filter((e) => e.status !== 'waiting')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 50)
+    .map(row);
   const errors = Object.entries(state.errors)
     .filter(([id]) => byId.has(id))
     .map(([id, v]) => ({ account: byId.get(id).emailAddress, provider: byId.get(id).provider, ...v }));
@@ -82,6 +90,7 @@ function summary() {
     checking: !!state.checking,
     nextCheckAt: state.checkedAt ? new Date(Date.parse(state.checkedAt) + CHECK_EVERY_MS).toISOString() : null,
     waiting,
+    done,
     errors,
   };
 }

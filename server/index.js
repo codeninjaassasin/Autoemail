@@ -149,27 +149,6 @@ app.get('/oauth/microsoft/callback', async (req, res) => {
   }
 });
 
-// --- Draft creation ---
-// Compose drafts to the scraped posts themselves: the newest posts that have an
-// email, no phone and no draft yet, each filled from its own fields. Never sends.
-app.get('/api/drafts/ready', (req, res) => {
-  const list = autoDrafts.ready(req.query.days);
-  res.json({
-    ready: list.length,
-    max: autoDrafts.COMPOSE_MAX,
-    next: list.slice(0, 5).map((r) => ({ id: r.id, title: r.title, area: r.area, postedAt: r.postedAt || null, to: autoDrafts.recipient(r) })),
-  });
-});
-app.post('/api/drafts', async (req, res) => {
-  try {
-    const { accountIds, subject, bodyHtml, templateId, limit, days } = req.body || {};
-    const results = await autoDrafts.draftFromCompose({ accountIds, subject, bodyHtml, templateId, limit, days });
-    res.json({ ok: true, results });
-  } catch (err) {
-    res.status(400).json({ ok: false, error: err.message });
-  }
-});
-
 // Which providers can be connected (credentials present) and the redirect
 // address Google/Microsoft send the browser back to.
 app.get('/api/connect/status', (req, res) =>
@@ -195,7 +174,11 @@ app.put('/api/templates/:id', (req, res) => {
     res.status(400).json({ ok: false, error: err.message });
   }
 });
-app.delete('/api/templates/:id', (req, res) => res.json({ ok: templates.remove(req.params.id) }));
+app.delete('/api/templates/:id', (req, res) => {
+  const ok = templates.remove(req.params.id);
+  autoDrafts.forgetTemplate(req.params.id); // its mailboxes stop drafting
+  res.json({ ok });
+});
 
 // --- Automatic drafts: new no-phone posts -> one draft from the mailbox's template. Never sends. ---
 app.get('/api/automation', (req, res) => res.json(autoDrafts.summary()));
@@ -454,14 +437,14 @@ app.get('/api/db-format', (req, res) => {
       },
     },
     'data/templates.json': {
-      description: 'Email templates picked in the Drafts tab.',
+      description: 'Email templates, edited in the Drafts tab and assigned to mailboxes. The body is plain text; its lines are kept line for line in the draft.',
       shape: 'Array<Template>',
-      record: { id: 'uuid', name: 'string (unique)', subject: 'string', bodyHtml: 'HTML string', createdAt: 'ISOString', updatedAt: 'ISOString' },
+      record: { id: 'uuid', name: 'string (unique)', subject: 'string with {{fields}}', body: 'multi-line text with {{fields}}', createdAt: 'ISOString', updatedAt: 'ISOString' },
       count: templates.list().length,
     },
     'data/automation.json': {
-      description: 'Automatic drafts: on/off, when it was switched on (only posts scraped after that are drafted), the template assigned to each mailbox, and counters. Each drafted contact gets an `autoDraft` field in contacts.json.',
-      shape: '{ enabled, enabledAt, assignments: { [accountId]: { templateId } }, cursor, drafted, failed, lastDraftAt, lastError }',
+      description: 'Automatic drafts: on/off, when it was switched on (only posts scraped after that are drafted), the per-mailbox limits, the template assigned to each mailbox, each mailbox\'s draft times in the last 24 hours, and the recent choices with their reasons. Each drafted contact gets an `autoDraft` field in contacts.json.',
+      shape: '{ enabled, enabledAt, limits: { perDay, perHour }, assignments: { [accountId]: { templateId } }, usage: { [accountId]: ISOString[] }, lastAccountId, recent: Array<{ at, ok, email, template, title, to, reason, error? }>, drafted, failed, lastDraftAt, lastError }',
     },
     'data/drafts.json': {
       description: 'Drafts this app created, for the reminder. The app never sends; a draft is "gone" once it leaves the Drafts folder (sent or deleted by you). Gone entries are kept 30 days.',

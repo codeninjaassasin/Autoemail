@@ -7,8 +7,8 @@
 /* Hallmark · dismissed F4 · .tabs button is a text tab with an underline, never a filled button; the one fill is .btn--primary */
 /* Hallmark · dismissed F6 · the lead reading is the run state as a word (running, idle), not a figure */
 /* Hallmark · answered F7 · the six row icon controls share one recipe on purpose: they sit side by side in every ledger row and must read as one set */
-/* Hallmark · answered F7 · the six panels (telemetry, setup, ledger, accounts, waiting drafts, compose) share one surface recipe on purpose: an app screen reads as one set of tool panels on one ground */
-/* Hallmark · dropped recipients · Compose now drafts to the scraped posts themselves (email, no phone, no draft yet), so a typed recipient list has no job */
+/* Hallmark · answered F7 · the six panels (telemetry, setup, ledger, accounts, drafted emails, automatic drafts, templates) share one surface recipe on purpose: an app screen reads as one set of tool panels on one ground */
+/* Hallmark · dropped https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js, create, draftResult, editor, recipients · drafts are made only by the rules (strict per-mailbox limits), so the compose form, its recipient list and the rich editor have no job; templates are written in a dialog as plain lines */
 @import url("./tokens.css");
 @import url("./base.css");
 
@@ -332,8 +332,8 @@ a.title-clamp:hover { color: var(--color-accent); text-decoration: underline; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* ---------- Drafts ---------- */
-.draftgrid { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--space-md); flex: 1 1 auto; min-height: 0; overflow: auto; padding-bottom: var(--space-md); align-items: start; }
-.acctpanel, .composepanel { background: var(--color-paper-2); color: var(--color-ink); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-md); }
+.draftgrid { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--space-md); flex: 1 1 auto; min-height: 0; overflow: auto; padding-bottom: var(--space-md); align-items: start; align-content: start; }
+.acctpanel, .tplpanel { background: var(--color-paper-2); color: var(--color-ink); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-md); }
 .accounts { list-style: none; padding: 0; margin: 0; }
 .accounts li { display: flex; align-items: center; gap: var(--space-xs); padding: var(--space-xs) 0; border-bottom: var(--rule-hair) solid var(--color-rule); }
 .accounts li.sub { color: var(--color-muted); }
@@ -350,15 +350,17 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
 .remindhead h2 { margin: 0; }
 .remind-sub { margin: var(--space-2xs) 0 var(--space-sm); font-size: var(--text-xs); line-height: 1.45; color: var(--color-muted); }
 .remindlist { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
-.remindlist li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-sm); row-gap: var(--space-3xs); padding: var(--space-xs) 0; border-top: var(--rule-hair) solid var(--color-rule); }
+.remindlist li { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: var(--space-sm); row-gap: var(--space-3xs); padding: var(--space-xs) 0; border-top: var(--rule-hair) solid var(--color-rule); }
 .remindlist li.sub { display: block; color: var(--color-muted); font-size: var(--text-xs); }
 .remindlist .btn { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.remindlist li.is-done .r-subj, .remindlist li.is-done .r-to { color: var(--color-muted); }
 .r-to { font-family: var(--font-outlier); font-size: var(--text-xs); color: var(--color-ink); overflow-wrap: anywhere; }
 .r-subj { font-size: var(--text-sm); color: var(--color-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .r-meta { font-size: var(--text-xs); color: var(--color-muted); }
 .remindlist li.is-old .r-meta { color: var(--color-accent); }
+.remindlist li.remind-err { grid-template-columns: minmax(0, 1fr) auto; }
 .remindlist li.remind-err .r-meta { color: var(--color-bad); }
-/* Right column: automatic drafts above compose. */
+/* Right column: automatic drafts, then templates. */
 .draftmain { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; }
 .autopanel { background: var(--color-paper-2); color: var(--color-ink); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-md); }
 .autohead { display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
@@ -398,33 +400,82 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
 .field-chip:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 /* Ledger: an automatic draft waits for this post. */
 .draft-chip { display: inline-block; margin-left: var(--space-2xs); padding: 0 var(--space-2xs); border: var(--rule-hair) solid var(--color-accent); border-radius: 4px; color: var(--color-ink); background: var(--color-accent-soft); font-size: var(--text-xs); line-height: 1.5; white-space: nowrap; }
-/* Template picker above the subject. */
-.tplbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: var(--space-sm); align-items: end; margin-bottom: var(--space-md); padding-bottom: var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
-.tplfield { display: block; font-size: var(--text-xs); color: var(--color-muted); }
-.tplfield > input, .tplfield > select { margin-top: var(--space-2xs); }
-.tplfield > select { cursor: pointer; }
-.tplacts { display: flex; align-items: center; gap: var(--space-xs); min-height: var(--control-h); }
-.draft-note { font-size: var(--text-xs); color: var(--color-muted); }
-/* Compose drafts to scraped posts: how many, and how recent. */
-.targetbar { margin-top: var(--space-md); padding-top: var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); }
-.target-head { margin: 0; font-size: var(--text-sm); font-weight: 500; color: var(--color-ink); }
-.target-sum { margin: var(--space-2xs) 0 var(--space-sm); font-size: var(--text-xs); color: var(--color-muted); max-width: 64ch; }
-.targetfields { display: grid; grid-template-columns: repeat(2, minmax(0, 12rem)); gap: var(--space-sm); }
-@media (max-width: 480px) { .targetfields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+/* Per-mailbox limits, as one sentence with two number fields. */
+.limits { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); margin: 0 0 var(--space-md); font-size: var(--text-sm); color: var(--color-ink-2); }
+.limit { display: inline-flex; align-items: center; gap: var(--space-xs); }
+.limit input { width: 5.5rem; font-family: var(--font-outlier); font-variant-numeric: tabular-nums; }
+/* Who is next, and why: the panel's one read. */
+.nextpick { margin: 0 0 var(--space-md); padding: var(--space-sm) var(--space-md); border: var(--rule-hair) solid var(--color-accent); background: var(--color-paper-3); border-radius: var(--radius-card); }
+.nextpick p { margin: 0; }
+.np-lead { font-size: var(--text-xs); color: var(--color-muted); }
+.np-mail { margin-top: var(--space-3xs) !important; font: 500 var(--text-lg)/1.25 var(--font-outlier); color: var(--color-ink); overflow-wrap: anywhere; }
+.np-mail.np-none { color: var(--color-muted); }
+.np-why { margin-top: var(--space-2xs) !important; font-size: var(--text-sm); color: var(--color-ink-2); max-width: 80ch; }
+.np-post { margin-top: var(--space-2xs) !important; font-size: var(--text-xs); color: var(--color-muted); max-width: 80ch; overflow-wrap: anywhere; }
+.np-title { color: var(--color-ink-2); }
+.autotable tr.is-next td { background: var(--color-accent-soft); }
+.autotable tr.is-next td:first-child { box-shadow: inset 3px 0 0 var(--color-accent); }
+.auto-turn { width: 3.5rem; padding-left: var(--space-xs) !important; font-size: var(--text-xs); color: var(--color-muted); white-space: nowrap; }
+.autotable tr.is-next .auto-turn { color: var(--color-ink); font-weight: 500; }
+.auto-num { font-family: var(--font-outlier); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.auto-why { font-size: var(--text-xs); min-width: 14rem; }
+.auto-why > span { display: block; }
+.auto-note { color: var(--color-muted); }
+.rules { margin: var(--space-sm) 0 0; font-size: var(--text-xs); color: var(--color-ink-2); }
+.rules summary { cursor: pointer; color: var(--color-ink); width: fit-content; }
+.rules summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.rules ol { margin: var(--space-xs) 0 0; padding-left: var(--space-lg); line-height: 1.6; max-width: 80ch; }
+.recent-head { margin: var(--space-md) 0 var(--space-2xs); font-size: var(--text-sm); font-weight: 500; color: var(--color-ink); }
+.recentlist { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.recentlist li { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); column-gap: var(--space-sm); padding: var(--space-2xs) 0; border-top: var(--rule-hair) solid var(--color-rule); font-size: var(--text-xs); }
+.recentlist li.sub { display: block; color: var(--color-muted); }
+.rc-when { grid-row: 1 / span 2; font-family: var(--font-outlier); color: var(--color-muted); font-variant-numeric: tabular-nums; }
+.rc-what { color: var(--color-ink-2); overflow-wrap: anywhere; }
+.rc-title { color: var(--color-ink); }
+.rc-why { color: var(--color-muted); }
+.recentlist li.is-bad .rc-why { color: var(--color-bad); }
+/* Templates: a list; writing one happens in the dialog. */
+.tplhead { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-xs); }
+.tplhead h2 { margin: 0; }
+.tpllist { list-style: none; margin: 0; padding: 0; }
+.tpllist li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 14rem) auto; gap: var(--space-sm); align-items: center; padding: var(--space-sm) 0; border-top: var(--rule-hair) solid var(--color-rule); }
+.tpllist li.sub { display: block; color: var(--color-muted); font-size: var(--text-xs); }
+.tpl-main { display: flex; flex-direction: column; gap: var(--space-3xs); min-width: 0; }
+.tpl-name { font-weight: 500; color: var(--color-ink); }
+.tpl-subj { font-family: var(--font-outlier); font-size: var(--text-xs); color: var(--color-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-first { font-size: var(--text-xs); color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-boxes { display: flex; flex-wrap: wrap; gap: var(--space-3xs); min-width: 0; }
+.tpl-box { font-family: var(--font-outlier); font-size: var(--text-xs); color: var(--color-ink-2); overflow-wrap: anywhere; }
+/* Template dialog. */
+.tpldialog { width: min(720px, calc(100% - 2 * var(--space-md))); max-height: calc(100dvh - 2 * var(--space-md)); padding: 0; border: var(--rule-hair) solid var(--color-rule-2); border-radius: var(--radius-card); background: var(--color-paper-2); color: var(--color-ink); }
+.tpldialog::backdrop { background: color-mix(in oklab, var(--color-paper-3) 72%, transparent); }
+.tpldialog form { display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-lg); }
+.tpldialog h2 { margin: 0 0 var(--space-2xs); }
+.dfield { display: flex; flex-direction: column; gap: var(--space-2xs); font-size: var(--text-xs); color: var(--color-muted); }
+.dfield textarea { min-height: 14rem; font-family: var(--font-body); font-size: var(--text-sm); color: var(--color-ink); white-space: pre-wrap; }
+.dhint { margin: 0; font-size: var(--text-xs); color: var(--color-muted); }
+.tpldialog .fieldbar { margin: 0; }
+.tplboxes { margin: 0; padding: var(--space-sm) 0 0; border: 0; border-top: var(--rule-hair) solid var(--color-rule); display: flex; flex-direction: column; gap: var(--space-xs); }
+.tplboxes legend { padding: 0; font-size: var(--text-xs); color: var(--color-muted); }
+.tplbox { display: flex; align-items: center; gap: var(--space-xs); font-size: var(--text-sm); cursor: pointer; }
+.tplbox > span:first-of-type { font-family: var(--font-outlier); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.derr { margin: 0; font-size: var(--text-xs); color: var(--color-bad); }
+.derr:empty { display: none; }
+.dactions { display: flex; align-items: center; gap: var(--space-xs); flex-wrap: wrap; padding-top: var(--space-xs); }
+.dgap { flex: 1 1 auto; }
+.dangerish { color: var(--color-bad); }
+.dangerish[hidden] { display: none; }
+@media (max-width: 760px) {
+  .tpllist li { grid-template-columns: minmax(0, 1fr) auto; }
+  .tpl-boxes { grid-column: 1; }
+  .tpllist .tpl-edit { grid-column: 2; grid-row: 1 / span 2; }
+  .tpldialog form { padding: var(--space-md); }
+  .recentlist li { grid-template-columns: minmax(0, 1fr); }
+  .rc-when { grid-row: auto; }
+}
 /* Count of drafts waiting, on the Drafts tab. */
 .tabcount { display: inline-block; min-width: 1.6em; margin-left: var(--space-2xs); padding: 0 var(--space-2xs); border-radius: var(--radius-pill); background: var(--color-accent-soft); color: var(--color-ink); font: 500 var(--text-xs)/1.5 var(--font-outlier); text-align: center; font-variant-numeric: tabular-nums; }
 .tabcount[hidden] { display: none; }
-.composepanel > label { display: block; font-size: var(--text-xs); color: var(--color-muted); margin: 0 0 var(--space-2xs); }
-.composepanel > label:not(:first-of-type) { margin-top: var(--space-md); }
-.composepanel > label > input, .composepanel > label > textarea { margin-top: var(--space-2xs); }
-#editor { height: 280px; background: var(--color-paper-3); color: var(--color-ink); border-radius: 0 0 var(--radius-pill) var(--radius-pill); font-family: var(--font-body); }
-.ql-toolbar.ql-snow { border-color: var(--color-rule) !important; border-radius: var(--radius-pill) var(--radius-pill) 0 0; background: var(--color-paper-2); }
-.ql-container.ql-snow { border-color: var(--color-rule) !important; }
-.ql-snow .ql-stroke { stroke: var(--color-ink-2); }
-.ql-snow .ql-fill { fill: var(--color-ink-2); }
-.ql-snow .ql-picker { color: var(--color-ink-2); }
-.ql-snow .ql-picker-options { background: var(--color-paper-2); border-color: var(--color-rule) !important; }
-.ql-editor.ql-blank::before { color: var(--color-muted); }
 
 /* ---------- Storage and result blocks ---------- */
 .storagehead { display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; padding-bottom: var(--space-sm); }
@@ -456,7 +507,6 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
   .tabs { order: 3; flex-basis: 100%; min-height: 44px; overflow-x: auto; border-top: var(--rule-hair) solid var(--color-rule); }
   .signout { order: 2; }
   .draftgrid { grid-template-columns: minmax(0, 1fr); }
-  .tplbar { grid-template-columns: minmax(0, 1fr); }
 }
 /* Small or short screens: the page scrolls instead of squeezing the ledger to nothing. */
 @media (max-width: 760px), (max-height: 720px) {
@@ -528,4 +578,11 @@ a.btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: non
   .autotable tr:last-child { border-bottom: 0; }
   .autotable td { padding: var(--space-3xs) 0; border-bottom: 0; }
   .auto-tpl { width: 100%; min-width: 0; }
+  .autotable td[data-label]::before { content: attr(data-label) ": "; color: var(--color-muted); font-family: var(--font-body); }
+  .autotable .auto-num { display: inline-block; margin-right: var(--space-md); }
+  .auto-turn { width: auto; padding-left: 0 !important; }
+  .autotable tr.is-next td:first-child { box-shadow: none; }
+  .autotable tr.is-next { box-shadow: inset 3px 0 0 var(--color-accent); padding-left: var(--space-xs); background: var(--color-accent-soft); }
+  .autotable tr.is-next td { background: transparent; }
+  .auto-why { min-width: 0; }
 }
