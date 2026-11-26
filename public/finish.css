@@ -52,9 +52,6 @@ h2, .setup-title, .recent-head, .tpl-name { font-family: var(--font-display); fo
 .tracer .v { font-size: var(--text-lg); white-space: nowrap; transition: color var(--dur-long) var(--ease-out); }
 .tracer .stat-lead .v { white-space: normal; }
 #tracer.running .stat-lead { background: color-mix(in oklab, var(--color-accent) 7%, var(--color-paper-2)); }
-#tracer.running .stat-lead::before {
-  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--color-accent);
-}
 .tracer .stat-ok .v { color: var(--color-ok); }
 .tracer .stat-bad .v { color: var(--color-bad); }
 /* Page load, once: the readings come in left to right. */
@@ -161,3 +158,140 @@ input:focus-visible:not([type="checkbox"]), textarea:focus-visible, select:focus
 
 /* ---------- Scrollbars ---------- */
 .tablewrap, .tracelog, .ms-list, .recentlist, .draftgrid, .result { scrollbar-width: thin; scrollbar-color: var(--color-rule-2) transparent; }
+
+/* ======================================================================
+ * Pass 2: colour by kind, stamp faces, roomier layout.
+ * Colour is information: gold = the run, blue = mail and relays,
+ * green = caught and stored, red = gated and flagged, violet = phones,
+ * teal = proxies. The run's status is a perforated postage stamp.
+ * ====================================================================== */
+
+/* ---------- Type scale ---------- */
+body { font-size: 0.9rem; }
+.mono, .measured, .live-item b, .refresh-item b { font-stretch: 87.5%; }
+.wordmark { font-weight: 600; font-size: 0.98rem; letter-spacing: -0.02em; }
+h2, .setup-title, .recent-head { font-weight: 500; letter-spacing: -0.01em; }
+h2 { font-size: 1rem; }
+.tpl-name { font-family: var(--font-body); font-weight: 600; letter-spacing: 0; }
+
+/* ---------- Top bar: taller, tabs as pills with their own colour ---------- */
+.topbar { min-height: 62px; padding-top: 4px; }
+.tabs { align-self: center; gap: var(--space-2xs); padding: 3px; border: var(--rule-hair) solid var(--color-rule); border-radius: 12px; background: var(--color-paper); }
+.tabs button { min-height: 34px; padding: 0 var(--space-md); border-radius: 9px; font: 600 var(--text-sm)/1 var(--font-body); transition: background-color var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out); }
+.tabs button::after { display: none; }
+.tabs button::before { content: ""; width: 7px; height: 7px; margin-right: var(--space-xs); border-radius: 50%; background: currentColor; opacity: 0.35; transition: opacity var(--dur-short) var(--ease-out), transform 380ms var(--ease-spring); }
+.tabs button[data-tab="scraper"] { --tab-c: var(--c-run); }
+.tabs button[data-tab="drafts"] { --tab-c: var(--c-mail); }
+.tabs button[data-tab="storage"] { --tab-c: var(--c-proxy); }
+.tabs button:hover { background: var(--color-paper-2); }
+.tabs button.active { background: var(--color-paper-2); color: var(--color-ink); box-shadow: inset 0 0 0 1px var(--color-rule-2); }
+.tabs button.active::before { background: var(--tab-c); opacity: 1; transform: scale(1.25); }
+.tabs button:focus-visible { outline-offset: 2px; }
+.livestrip { gap: var(--space-sm); }
+.live-item { padding: 3px 9px; border-radius: 999px; background: var(--color-paper); border: var(--rule-hair) solid var(--color-rule); }
+.live-item:nth-of-type(1) b { color: var(--c-run); }
+.live-item:nth-of-type(2) b { color: var(--c-mail); }
+.live-item:nth-of-type(3) b { color: var(--c-ok); }
+
+/* ---------- Telemetry: a stamp, then readings coloured by kind ---------- */
+.tracer.compact { grid-template-columns: minmax(210px, 1.5fr) repeat(6, minmax(0, 1fr)) minmax(96px, auto); }
+.tracer .stat { --kind: var(--color-rule-2); padding: var(--space-md) var(--space-md) var(--space-sm); }
+.tracer .stat:not(.stat-lead)::after {
+  content: ""; position: absolute; left: var(--space-md); top: 0; width: 28px; height: 3px; border-radius: 0 0 3px 3px;
+  background: var(--kind); transition: width 380ms var(--ease-spring);
+}
+.tracer .stat:not(.stat-lead):hover::after { width: 56px; }
+.tracer .k { font-size: 0.72rem; font-weight: 500; color: var(--color-muted); }
+.tracer .v { font-size: 1.36rem; font-weight: 500; font-stretch: 75%; letter-spacing: -0.02em; color: var(--kind-ink, var(--color-ink)); }
+.stat:has(#t-workers), .stat:has(#t-queue) { --kind: var(--c-run); }
+.stat:has(#t-newq) { --kind: var(--c-mail); --kind-ink: var(--c-mail); }
+.stat:has(#t-stored), .stat:has(#t-relays), .stat:has(#t-contacts) { --kind: var(--c-ok); --kind-ink: var(--c-ok); }
+.stat:has(#t-gated), .stat:has(#t-dropped) { --kind: var(--c-bad); --kind-ink: var(--c-bad); }
+.stat:has(#t-proxu), .stat:has(#t-proxlive), .stat:has(#t-proxs), .stat:has(#t-proxcool), .stat:has(#t-proxfresh), .stat:has(#t-proxrelax), .stat:has(#t-autoref) { --kind: var(--c-proxy); --kind-ink: var(--c-proxy); }
+.stat:has(#t-ram), .stat:has(#t-heap), .stat:has(#t-uptime), .stat:has(#t-scope), .stat:has(#t-solver), .stat:has(#t-attempts), .stat:has(#t-cycles), .stat:has(#t-seen), .stat:has(#t-parked) { --kind: var(--c-phone); }
+.tracer .stat-ok .v, .tracer .stat-bad .v { color: var(--kind-ink); }
+
+/* The stamp: a perforated postage stamp. Gold while the run is on, slate when idle. */
+.tracer .stat-lead { isolation: isolate; padding: var(--space-md) var(--space-lg); justify-content: center; gap: 2px; background: var(--color-paper-2); }
+.tracer .stat-lead::before {
+  content: ""; position: absolute; inset: 9px; z-index: -1; padding: 5px;
+  background: var(--color-rule-2);
+  -webkit-mask: radial-gradient(circle, #0000 3.2px, #000 3.6px) -5px -5px / 10px 10px round, linear-gradient(#000 0 0) content-box;
+  mask: radial-gradient(circle, #0000 3.2px, #000 3.6px) -5px -5px / 10px 10px round, linear-gradient(#000 0 0) content-box;
+  transition: background-color var(--dur-long) var(--ease-out);
+}
+#tracer.running .stat-lead { background: var(--color-paper-2); }
+#tracer.running .stat-lead::before { background: var(--c-run); animation: stamp 620ms var(--ease-spring) both; }
+@keyframes stamp { 0% { transform: scale(1.18) rotate(-5deg); opacity: 0; } 60% { opacity: 1; } 100% { transform: none; } }
+.tracer .stat-lead .k { position: relative; padding-left: 10px; font-size: 0.7rem; color: var(--color-ink); opacity: 0.8; }
+.tracer .stat-lead .v { position: relative; padding-left: 10px; font-size: 1.7rem; font-weight: 600; letter-spacing: -0.03em; color: var(--color-ink); }
+#tracer.running .stat-lead .k, #tracer.running .stat-lead .v { color: var(--color-accent-ink); }
+#tracer.running .stat-lead .v { color: var(--color-accent-ink); }
+.tracer-toggle { font-weight: 600; color: var(--c-mail); }
+
+/* ---------- Run setup: title in the stamp face, the sentence's figures in gold ---------- */
+.setup-summary { padding: var(--space-md) var(--space-lg); align-items: center; }
+.setup-title { font-size: 0.92rem; }
+.run-sentence { font-size: 0.92rem; }
+.run-sentence b { color: var(--c-run); font-weight: 600; }
+.selectors { padding: var(--space-lg); gap: var(--space-xl); }
+.field > label { font-family: var(--font-display); font-size: 0.74rem; font-weight: 500; color: var(--color-ink-2); letter-spacing: 0; }
+.ms-item:has(input:checked) { color: var(--color-ink); }
+.ms-item input:checked { accent-color: var(--c-run); }
+
+/* ---------- Refresh strip: each figure as a chip in its kind's colour ---------- */
+.refreshbar { gap: var(--space-xs); }
+.refreshbar .refresh-item:not(:empty) { padding: 4px 10px; border-radius: 999px; background: var(--color-paper-2); border: var(--rule-hair) solid var(--color-rule); }
+.refresh-item:has(#r-fresh) b { color: var(--c-ok); }
+.refresh-item:has(#r-expired) b { color: var(--c-bad); }
+.refresh-item:has(#r-unchecked) b { color: var(--c-phone); }
+.refresh-item:has(#r-changes) b { color: var(--c-mail); }
+.refresh-state { padding: 4px 10px; border-radius: 999px; background: var(--color-paper-3); }
+.refresh-state.on { background: var(--color-cool-soft); }
+
+/* ---------- Filters ---------- */
+.resultsbar { gap: var(--space-sm); }
+.rowcount { font-size: 0.8rem; color: var(--color-ink-2); }
+
+/* ---------- Ledger: roomier rows, each kind in its colour ---------- */
+.results-table { font-size: 0.9rem; }
+.results-table thead th { padding: var(--space-sm); font-size: 0.72rem; font-weight: 600; color: var(--color-ink-2); }
+.results-table td { padding: 11px var(--space-sm); }
+.loc-name { font-weight: 600; }
+.loc-sub { font-family: var(--font-outlier); font-stretch: 87.5%; font-size: 0.68rem; }
+a.title-clamp { font-weight: 500; }
+a.title-clamp:hover { color: var(--c-run); text-decoration-color: var(--c-run); }
+.posted-date { color: var(--color-ink); }
+.relay-copy { font-size: 0.72rem; font-stretch: 87.5%; min-height: 28px; padding: 0 10px; }
+.results-table td:nth-child(7) { color: var(--c-phone); font-stretch: 87.5%; }
+.phone-line .phone-copy:hover { border-color: var(--c-phone); color: var(--c-phone); background: var(--c-phone-soft); }
+.manual-empty { font-style: italic; opacity: 0.85; }
+.fresh-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; }
+.fresh-badge.fresh { background: var(--color-ok-soft); }
+.fresh-badge.expired { background: var(--color-bad-soft); }
+/* A post marked sent is done: it steps back. */
+.results-table tbody tr:has(.sent-cb:checked) td { opacity: 0.55; transition: opacity var(--dur-short) var(--ease-out); }
+.results-table tbody tr:has(.sent-cb:checked):hover td { opacity: 1; }
+.results-table tbody tr:has(.sent-cb:checked) td:first-child { opacity: 1; box-shadow: inset 3px 0 0 var(--c-ok); }
+.sent-cb { width: 17px; height: 17px; accent-color: var(--c-ok); }
+
+/* ---------- Drafts: each panel marked with its kind ---------- */
+.acctpanel, .remindpanel, .autopanel, .tplpanel { position: relative; overflow: hidden; padding: var(--space-lg); }
+.acctpanel::before, .remindpanel::before, .autopanel::before, .tplpanel::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--panel-c, var(--color-rule-2)); }
+.acctpanel { --panel-c: var(--c-ok); }
+.autopanel { --panel-c: var(--c-run); }
+.remindpanel { --panel-c: var(--c-mail); }
+.tplpanel { --panel-c: var(--c-phone); }
+.auto-state.is-on { padding: 2px 8px; border-radius: 999px; background: var(--color-accent-soft); }
+.autostats dd { font-size: 1rem; color: var(--color-ink); }
+
+/* ---------- Phone ---------- */
+@media (max-width: 60rem) {
+  .tabs { border: 0; border-top: var(--rule-hair) solid var(--color-rule); border-radius: 0; background: none; padding: 6px 0; }
+  .topbar { padding-top: 4px; }
+}
+@media (max-width: 760px) {
+  .tracer.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tracer .stat-lead { min-height: 96px; }
+  .results-table td { padding: 0; }
+}
