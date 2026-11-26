@@ -281,11 +281,17 @@ fieldBar.addEventListener('click', (e) => {
 // ---------- Drafted emails ----------
 // Every draft the app made: still in Drafts (waiting for you to send it), or
 // gone from Drafts (you sent or deleted it). The server checks every 15 minutes.
-const remindList = document.getElementById('remindList');
+const remindRows = document.getElementById('remindRows');
+const remindErrs = document.getElementById('remindErrs');
+const remindEmpty = document.getElementById('remindEmpty');
+const remindCount = document.getElementById('remindCount');
 const remindSub = document.getElementById('remindSub');
 const remindCheck = document.getElementById('remindCheck');
 const draftsDue = document.getElementById('draftsDue');
 let remindToastShown = false;
+
+// An address that may wrap only before its @.
+const atBreak = (addr) => esc(addr).replace('@', '<wbr>@');
 
 function renderReminders(r) {
   const n = r.waiting.length;
@@ -297,24 +303,38 @@ function renderReminders(r) {
     ? 'Checking the Drafts folders…'
     : `${n ? `${n} waiting to be sent from Gmail.` : 'Nothing waiting to be sent.'} ${r.checkedAt ? `Checked ${agoText(r.checkedAt)}.` : ''}`;
 
-  const items = r.errors.map(
-    (e) => `<li class="remind-err">
-      <span class="r-to">${esc(e.account)}</span>
-      <span class="r-meta">${esc(e.error)}</span>
-      <a class="btn btn--quiet btn--sm" href="/connect/${e.provider === 'google' ? 'google' : 'microsoft'}">Connect again</a>
-    </li>`
-  );
-  const row = (d, done) => {
-    const old = !done && Date.now() - Date.parse(d.createdAt) > 86400000;
-    return `<li class="${done ? 'is-done' : old ? 'is-old' : ''}">
-      <span class="r-subj">${esc(d.subject || '(no subject)')}</span>
-      <span class="r-to">${esc(d.to)}</span>
-      <span class="r-meta">${esc(d.account)}, ${done ? 'sent or deleted' : 'waiting'}, made ${agoText(d.createdAt)}</span>
-    </li>`;
+  remindErrs.innerHTML = r.errors
+    .map(
+      (e) => `<li><span class="r-acct">${esc(e.account)}</span><span>${esc(e.error)}</span>
+        <a class="btn btn--quiet btn--sm" href="/connect/${e.provider === 'google' ? 'google' : 'microsoft'}">Connect again</a></li>`
+    )
+    .join('');
+
+  // Waiting drafts first, then the ones that left Drafts; newest first in each.
+  const done = r.done || [];
+  const row = (d, isDone, first) => {
+    const old = !isDone && Date.now() - Date.parse(d.createdAt) > 86400000;
+    const status = isDone
+      ? '<span class="d-status">Sent or deleted</span>'
+      : `<span class="d-status ${old ? 'is-old' : 'is-waiting'}" title="${old ? 'Waiting more than a day' : 'In Drafts, not sent yet'}">Waiting</span>`;
+    const p = d.post;
+    const title = p ? esc(p.title || '(untitled)') : '';
+    const post = !p
+      ? '<span class="auto-dim">Not from a post</span>'
+      : `${p.url ? `<a class="title-clamp" href="${esc(p.url)}" target="_blank" rel="noopener" title="${title}">${title}</a>` : `<span class="title-clamp">${title}</span>`}<span class="d-area">${esc([p.place, p.posted ? 'posted ' + p.posted : ''].filter(Boolean).join(', '))}</span>`;
+    return `<tr class="${[isDone ? 'is-done' : '', first ? 'group-start' : ''].filter(Boolean).join(' ')}">
+      <td>${status}</td>
+      <td class="d-when" title="${esc(new Date(d.createdAt).toLocaleString())}">${clockText(d.createdAt)}</td>
+      <td class="d-post">${post}</td>
+      <td class="d-subj">${esc(d.subject || '(no subject)')}</td>
+      <td class="d-to" title="${esc(d.to)}">${atBreak(/@res\.craigslist\.org$/i.test(d.to) ? shortRelay(d.to) : d.to)}</td>
+      <td class="d-box">${atBreak(d.account)}</td>
+    </tr>`;
   };
-  for (const d of r.waiting) items.push(row(d, false));
-  for (const d of r.done || []) items.push(row(d, true));
-  remindList.innerHTML = items.length ? items.join('') : '<li class="sub">No drafts made yet.</li>';
+  remindRows.innerHTML =
+    r.waiting.map((d) => row(d, false, false)).join('') + done.map((d, i) => row(d, true, i === 0 && r.waiting.length > 0)).join('');
+  remindEmpty.hidden = r.waiting.length + done.length > 0;
+  remindCount.textContent = `${n} waiting, ${done.length} sent or deleted`;
 
   if (n && !remindToastShown) {
     remindToastShown = true;
@@ -357,7 +377,6 @@ const autoToggle = document.getElementById('autoToggle');
 const autoState = document.getElementById('autoState');
 const autoStats = document.getElementById('autoStats');
 const autoMsg = document.getElementById('autoMsg');
-const autoNext = document.getElementById('autoNext');
 const autoRecent = document.getElementById('autoRecent');
 const limitDay = document.getElementById('limitDay');
 const limitHour = document.getElementById('limitHour');
@@ -375,7 +394,7 @@ const STATUS_TEXT = {
 function whyText(m) {
   if (m.status === 'hour-full' || m.status === 'day-full') return `${m.note} Room again at ${clockText(m.freeAt)}.`;
   if (m.status === 'paused') return `${m.note} Tries again at ${clockText(m.freeAt)}.`;
-  if (m.status === 'free') return m.position === 1 ? 'Gets the next post. The reason is above.' : `Gets a post after number ${m.position - 1}.`;
+  if (m.status === 'free') return m.position === 1 ? `Gets the next post: ${autoData.next ? autoData.next.reason : ''}.` : `Gets a post after number ${m.position - 1}.`;
   return m.note;
 }
 
@@ -388,23 +407,6 @@ function renderAuto(a) {
   autoState.classList.toggle('is-on', a.enabled);
   if (document.activeElement !== limitDay) limitDay.value = a.limits.perDay;
   if (document.activeElement !== limitHour) limitHour.value = a.limits.perHour;
-
-  // Who is next, and why.
-  let next;
-  if (a.next) {
-    const post = a.nextPost
-      ? `<p class="np-post">Next post: <span class="np-title">${esc(a.nextPost.title)}</span>, to ${esc(a.nextPost.to)}. ${a.pending > 1 ? `${a.pending - 1} more waiting.` : ''}</p>`
-      : `<p class="np-post">${a.enabled ? 'No post waiting. The next new post without a phone goes here.' : 'Turned off, so no post is drafted.'}</p>`;
-    next = `<p class="np-lead">Next mailbox</p>
-      <p class="np-mail">${esc(a.next.email)}</p>
-      <p class="np-why">Why: ${esc(a.next.reason)}. Template: ${esc(a.next.template)}.</p>${post}`;
-  } else {
-    next = `<p class="np-lead">Next mailbox</p>
-      <p class="np-mail np-none">None right now</p>
-      <p class="np-why">${esc(a.waitReason || '')}${a.freeAt ? ` The first one has room again at ${clockText(a.freeAt)}.` : ''}</p>
-      ${a.pending ? `<p class="np-post">${a.pending} post${a.pending === 1 ? '' : 's'} waiting.</p>` : ''}`;
-  }
-  autoNext.innerHTML = next;
 
   if (!a.mailboxes.length) {
     autoRows.innerHTML = '<tr><td colspan="6" class="sub">Connect a Gmail account to assign it a template.</td></tr>';

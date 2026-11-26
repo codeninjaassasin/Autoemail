@@ -204,14 +204,6 @@
                 </div>
                 <p class="connect-note" id="connectNote" hidden></p>
               </aside>
-              <section class="remindpanel" aria-labelledby="remindHead">
-                <div class="remindhead">
-                  <h2 id="remindHead">Drafted emails</h2>
-                  <button id="remindCheck" class="btn btn--quiet btn--sm" type="button">Check now</button>
-                </div>
-                <p class="remind-sub" id="remindSub">Drafts made here stay unsent until you send them yourself from Gmail.</p>
-                <ul id="remindList" class="remindlist"></ul>
-              </section>
             </div>
             <div class="draftmain">
               <section class="autopanel" aria-labelledby="autoHead">
@@ -227,7 +219,6 @@
                   <span class="limits-and">and</span>
                   <label class="limit"><input id="limitHour" type="number" min="1" max="500" inputmode="numeric" aria-label="Drafts per hour" /> per hour</label>
                 </div>
-                <div class="nextpick" id="autoNext" aria-live="polite"></div>
                 <div class="autotablewrap">
                   <table class="autotable">
                     <thead><tr><th scope="col">Turn</th><th scope="col">Mailbox</th><th scope="col">Template</th><th scope="col">Last hour</th><th scope="col">Last 24 h</th><th scope="col">Why</th></tr></thead>
@@ -247,6 +238,22 @@
                 <ul class="recentlist" id="autoRecent"></ul>
                 <dl class="autostats" id="autoStats"></dl>
                 <p class="auto-msg" id="autoMsg" role="status"></p>
+              </section>
+              <section class="remindpanel" aria-labelledby="remindHead">
+                <div class="remindhead">
+                  <h2 id="remindHead">Drafted emails</h2>
+                  <span class="rowcount" id="remindCount"></span>
+                  <button id="remindCheck" class="btn btn--quiet btn--sm" type="button">Check now</button>
+                </div>
+                <p class="remind-sub" id="remindSub">Drafts made here stay unsent until you send them yourself from Gmail.</p>
+                <ul class="remind-errs" id="remindErrs"></ul>
+                <div class="tablewrap draftswrap">
+                  <table class="drafts-table">
+                    <thead><tr><th scope="col">Status</th><th scope="col">Drafted</th><th scope="col">Post</th><th scope="col">Subject</th><th scope="col">To</th><th scope="col">Mailbox</th></tr></thead>
+                    <tbody id="remindRows"></tbody>
+                  </table>
+                  <div id="remindEmpty" class="empty" hidden>No drafts made yet. Each automatic draft shows up here.</div>
+                </div>
               </section>
               <section class="tplpanel" aria-labelledby="tplHead">
                 <div class="tplhead">
