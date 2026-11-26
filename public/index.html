@@ -12,7 +12,6 @@
       href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;500&family=Host+Grotesk:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -207,70 +206,55 @@
               </aside>
               <section class="remindpanel" aria-labelledby="remindHead">
                 <div class="remindhead">
-                  <h2 id="remindHead">Waiting in Drafts</h2>
+                  <h2 id="remindHead">Drafted emails</h2>
                   <button id="remindCheck" class="btn btn--quiet btn--sm" type="button">Check now</button>
                 </div>
-                <p class="remind-sub" id="remindSub">Drafts made here stay unsent until you review and send them yourself.</p>
+                <p class="remind-sub" id="remindSub">Drafts made here stay unsent until you send them yourself from Gmail.</p>
                 <ul id="remindList" class="remindlist"></ul>
               </section>
             </div>
             <div class="draftmain">
-            <section class="autopanel" aria-labelledby="autoHead">
-              <div class="autohead">
-                <h2 id="autoHead">Automatic drafts</h2>
-                <span class="auto-state" id="autoState">Off</span>
-                <button id="autoToggle" class="btn btn--quiet btn--sm" type="button" aria-pressed="false">Turn on</button>
-              </div>
-              <p class="auto-sub">Every post scraped after you turn this on that has an email and no phone gets one draft, from the template its mailbox is assigned. Mailboxes with a template take turns. Nothing is sent: you review and send each draft yourself.</p>
-              <div class="autotablewrap">
-                <table class="autotable">
-                  <thead><tr><th scope="col">Mailbox</th><th scope="col">Template</th><th scope="col">State</th></tr></thead>
-                  <tbody id="autoRows"><tr><td colspan="3" class="sub">Connect a Gmail account to assign it a template.</td></tr></tbody>
-                </table>
-              </div>
-              <dl class="autostats" id="autoStats"></dl>
-              <p class="auto-msg" id="autoMsg" role="status"></p>
-            </section>
-            <div class="composepanel">
-              <h2>Compose</h2>
-              <div class="tplbar">
-                <label class="tplfield">Template
-                  <select id="tplSelect"><option value="">No template</option></select>
-                </label>
-                <label class="tplfield">Template name<input id="tplName" type="text" maxlength="80" placeholder="Name it to save" /></label>
-                <div class="tplacts">
-                  <button id="tplSave" class="btn btn--quiet btn--sm" type="button">Save as template</button>
-                  <button id="tplDelete" class="btn btn--quiet btn--sm" type="button" disabled>Delete</button>
+              <section class="autopanel" aria-labelledby="autoHead">
+                <div class="autohead">
+                  <h2 id="autoHead">Automatic drafts</h2>
+                  <span class="auto-state" id="autoState">Off</span>
+                  <button id="autoToggle" class="btn btn--quiet btn--sm" type="button" aria-pressed="false">Turn on</button>
                 </div>
-              </div>
-              <div class="fieldbar" id="fieldBar">
-                <span class="fieldbar-label">Fill from the post</span>
-              </div>
-              <label>Subject<input id="subject" type="text" /></label>
-              <label>Body</label>
-              <div id="editor"></div>
-              <div class="targetbar">
-                <p class="target-head">Who gets a draft</p>
-                <p class="target-sum" id="targetSum" role="status">Counting scraped posts…</p>
-                <div class="targetfields">
-                  <label class="tplfield">Posted within
-                    <select id="draftDays">
-                      <option value="1">24 hours</option>
-                      <option value="3">3 days</option>
-                      <option value="7" selected>7 days</option>
-                      <option value="30">30 days</option>
-                      <option value="0">Any time</option>
-                    </select>
-                  </label>
-                  <label class="tplfield">How many<input id="draftLimit" type="number" min="1" max="100" value="25" inputmode="numeric" /></label>
+                <p class="auto-sub">Each post scraped after you turn this on that has an email and no phone gets one draft, from the template of the mailbox chosen below. Nothing is sent.</p>
+                <div class="limits">
+                  <span class="limits-lead">Each mailbox makes at most</span>
+                  <label class="limit"><input id="limitDay" type="number" min="1" max="500" inputmode="numeric" aria-label="Drafts per 24 hours" /> per 24 hours</label>
+                  <span class="limits-and">and</span>
+                  <label class="limit"><input id="limitHour" type="number" min="1" max="500" inputmode="numeric" aria-label="Drafts per hour" /> per hour</label>
                 </div>
-              </div>
-              <div class="actions">
-                <button id="create" class="btn btn--primary" type="button">Create drafts</button>
-                <span class="draft-note">Drafts only. Nothing is sent from here.</span>
-              </div>
-              <pre id="draftResult" class="result" hidden></pre>
-            </div>
+                <div class="nextpick" id="autoNext" aria-live="polite"></div>
+                <div class="autotablewrap">
+                  <table class="autotable">
+                    <thead><tr><th scope="col">Turn</th><th scope="col">Mailbox</th><th scope="col">Template</th><th scope="col">Last hour</th><th scope="col">Last 24 h</th><th scope="col">Why</th></tr></thead>
+                    <tbody id="autoRows"><tr><td colspan="6" class="sub">Connect a Gmail account to assign it a template.</td></tr></tbody>
+                  </table>
+                </div>
+                <details class="rules">
+                  <summary>How the next mailbox is chosen</summary>
+                  <ol>
+                    <li>Only mailboxes with a template, not paused, and under both limits above.</li>
+                    <li>Not the mailbox that made the last draft, while another one has room.</li>
+                    <li>The one with the most drafts left in 24 hours, then the most left this hour, then the one idle longest.</li>
+                    <li>When every mailbox is full, posts wait and the newest is drafted first once one has room.</li>
+                  </ol>
+                </details>
+                <h3 class="recent-head">Recent choices</h3>
+                <ul class="recentlist" id="autoRecent"></ul>
+                <dl class="autostats" id="autoStats"></dl>
+                <p class="auto-msg" id="autoMsg" role="status"></p>
+              </section>
+              <section class="tplpanel" aria-labelledby="tplHead">
+                <div class="tplhead">
+                  <h2 id="tplHead">Templates</h2>
+                  <button id="tplNew" class="btn btn--primary btn--sm" type="button">New template</button>
+                </div>
+                <ul class="tpllist" id="tplList"></ul>
+              </section>
             </div>
           </div>
         </section>
@@ -287,8 +271,30 @@
       </main>
     </div>
 
+    <dialog id="tplDialog" class="tpldialog" aria-labelledby="tplDialogTitle">
+      <form id="tplForm" method="dialog" novalidate>
+        <h2 id="tplDialogTitle">New template</h2>
+        <label class="dfield">Name<input id="tplName" type="text" maxlength="80" autocomplete="off" required /></label>
+        <div class="fieldbar" id="fieldBar"><span class="fieldbar-label">Fill from the post</span></div>
+        <label class="dfield">Subject<input id="subject" type="text" maxlength="300" autocomplete="off" required /></label>
+        <label class="dfield">Body<textarea id="tplBody" rows="12" spellcheck="true" required></textarea></label>
+        <p class="dhint">Write it the way it should look in Gmail: every line and blank line stays as typed.</p>
+        <fieldset class="tplboxes">
+          <legend>Use for these mailboxes</legend>
+          <div id="tplBoxes"></div>
+          <p class="dhint">A mailbox uses one template. Ticking it here moves it from its other template.</p>
+        </fieldset>
+        <p class="derr" id="tplErr" role="alert"></p>
+        <div class="dactions">
+          <button id="tplDelete" class="btn btn--quiet btn--sm dangerish" type="button">Delete</button>
+          <span class="dgap"></span>
+          <button id="tplCancel" class="btn btn--quiet" type="button">Cancel</button>
+          <button id="tplSave" class="btn btn--primary" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
     <div id="toasts" class="toasts" aria-live="polite"></div>
-    <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
     <script>
       // Blocked by the admin: any API call answering 403 reloads the page,
       // which then shows the "access turned off" notice.

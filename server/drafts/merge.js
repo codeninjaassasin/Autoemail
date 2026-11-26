@@ -39,18 +39,34 @@ function escHtml(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 }
 
-function fill(text, vals, html) {
+function fill(text, vals) {
   return String(text || '').replace(/\{\{\s*([a-z]+)\s*\}\}/gi, (m, key) => {
     const k = key.toLowerCase();
-    if (!FIELDS.includes(k)) return m;
-    return html ? escHtml(vals[k]) : vals[k];
+    return FIELDS.includes(k) ? vals[k] : m;
   });
 }
 
-// { subject, bodyHtml } for one contact from one template.
-function render(template, contact) {
-  const vals = values(contact);
-  return { subject: fill(template.subject, vals, false), bodyHtml: fill(template.bodyHtml, vals, true) };
+// Plain multi-line text -> the HTML Gmail's own editor writes: one <div> per
+// line, <div><br></div> for a blank line, so the draft opens with exactly the
+// lines of the template. Web addresses become links.
+function textToHtml(text) {
+  return String(text)
+    .split('\n')
+    .map((line) => {
+      if (!line.trim()) return '<div><br></div>';
+      const html = escHtml(line)
+        .replace(/ {2}/g, ' &nbsp;')
+        .replace(/https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"]/g, (u) => `<a href="${u}">${u}</a>`);
+      return `<div>${html}</div>`;
+    })
+    .join('');
 }
 
-module.exports = { render, values, FIELDS };
+// { subject, bodyText, bodyHtml } for one contact from one template.
+function render(template, contact) {
+  const vals = values(contact);
+  const bodyText = fill(template.body, vals).replace(/\r\n?/g, '\n');
+  return { subject: fill(template.subject, vals).replace(/[\r\n]+/g, ' '), bodyText, bodyHtml: textToHtml(bodyText) };
+}
+
+module.exports = { render, values, textToHtml, FIELDS };
