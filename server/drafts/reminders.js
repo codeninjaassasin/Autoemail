@@ -5,6 +5,8 @@
 // the person reviews, edits and sends each one in Gmail or Outlook themselves.
 
 const accounts = require('../accounts');
+const contacts = require('../contacts');
+const { values } = require('./merge');
 const log = require('./log');
 const gmail = require('./gmail');
 const graph = require('./graph');
@@ -56,11 +58,22 @@ function check() {
   return state.checking;
 }
 
+// The post a draft answers: title without the category suffix, and its place.
+function postInfo(c) {
+  const v = values(c);
+  return { title: v.title || c.title || '', url: c.url || null, place: [v.city, v.state].filter(Boolean).join(', '), posted: v.posted };
+}
+
 function summary() {
   const byId = new Map(accounts.all().map((a) => [a.id, a]));
+  const wanted = new Set(log.all().map((e) => e.contactId).filter(Boolean));
+  const posts = new Map();
+  if (wanted.size) for (const c of contacts.list()) if (wanted.has(c.id)) posts.set(c.id, c);
   const row = (e) => {
     const account = byId.get(e.accountId);
+    const post = e.contactId ? posts.get(e.contactId) : null;
     return {
+      post: post ? postInfo(post) : null,
       id: e.id,
       to: e.to,
       subject: e.subject,
