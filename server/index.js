@@ -11,6 +11,7 @@ const microsoftOauth = require('./oauth/microsoft');
 const draftLog = require('./drafts/log');
 const reminders = require('./drafts/reminders');
 const autoDrafts = require('./drafts/auto');
+const replies = require('./drafts/replies');
 const templates = require('./templates');
 const scraper = require('./scraper');
 const refresher = require('./scraper/refresher');
@@ -111,6 +112,7 @@ app.delete('/api/accounts/:id', (req, res) => {
   accounts.remove(req.params.id);
   draftLog.forgetAccount(req.params.id);
   autoDrafts.forgetAccount(req.params.id);
+  replies.forgetAccount(req.params.id);
   res.json({ ok: true });
 });
 
@@ -191,10 +193,17 @@ app.put('/api/automation', (req, res) => {
 });
 
 // --- Draft reminders: drafts this app made that still sit unsent. Read-only. ---
-app.get('/api/reminders', (req, res) => res.json(reminders.summary()));
+app.get('/api/reminders', (req, res) => res.json({ ...reminders.summary(), replies: replies.summary() }));
+
+// Replies to sent drafts (headers only): mark read, or check now.
+app.post('/api/replies/seen', (req, res) => res.json({ ok: true, marked: replies.markSeen(req.body?.ids), replies: replies.summary() }));
+app.post('/api/replies/check', async (req, res) => {
+  await replies.check().catch(() => {});
+  res.json({ ...reminders.summary(), replies: replies.summary() });
+});
 app.post('/api/reminders/check', async (req, res) => {
-  await reminders.check().catch(() => {});
-  res.json(reminders.summary());
+  await Promise.all([reminders.check().catch(() => {}), replies.check().catch(() => {})]);
+  res.json({ ...reminders.summary(), replies: replies.summary() });
 });
 
 // --- Contacts store ---
@@ -446,12 +455,16 @@ app.get('/api/db-format', (req, res) => {
       description: 'Automatic drafts: on/off, when it was switched on (only posts scraped after that are drafted), the per-mailbox limits, the template assigned to each mailbox, each mailbox\'s draft times in the last 24 hours, and the recent choices with their reasons. Each drafted contact gets an `autoDraft` field in contacts.json.',
       shape: '{ enabled, enabledAt, limits: { perDay, perHour }, assignments: { [accountId]: { templateId } }, usage: { [accountId]: ISOString[] }, lastAccountId, recent: Array<{ at, ok, email, template, title, to, reason, error? }>, drafted, failed, lastDraftAt, lastError }',
     },
+    'data/replies.json': {
+      description: 'Replies to sent drafts, found every minute from each Gmail\'s change history (gmail.metadata scope: sender, subject, date; never the body). Unread ones badge the Drafts tab and raise a desktop notification until marked read.',
+      shape: '{ accounts: { [accountId]: { historyId, checkedAt, error } }, replies: Array<{ id, accountId, logId, contactId, threadId, from, subject, snippet, at, foundAt, seenAt }> }',
+    },
     'data/drafts.json': {
       description: 'Drafts this app created, for the reminder. The app never sends; a draft is "gone" once it leaves the Drafts folder (sent or deleted by you). Gone entries are kept 30 days.',
       shape: 'Array<DraftEntry>',
       record: {
         id: 'uuid', accountId: 'uuid', provider: '"google" | "microsoft"', to: 'string', subject: 'string', templateId: 'uuid | null',
-        draftId: 'provider draft id', messageId: 'string (google: current message id)', webLink: 'string (microsoft)',
+        draftId: 'provider draft id', messageId: 'string (google: current message id)', threadId: 'string (google: the thread replies arrive in)', webLink: 'string (microsoft)',
         status: '"waiting" | "gone"', createdAt: 'ISOString', goneAt: 'ISOString',
       },
       count: draftLog.all().length,
@@ -590,6 +603,7 @@ require('./postDates').start(broadcast);
 reminders.start();
 // Background: draft new no-phone posts from the assigned templates (when switched on).
 autoDrafts.start();
+replies.start();
 // Repair: a contact without a posted date takes it from its listed post, if
 // known (contacts filled by hand used to be saved without one).
 {

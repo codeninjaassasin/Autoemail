@@ -79,4 +79,14 @@ function forgetAccount(accountId) {
   if (next.length !== list.length) save(next);
 }
 
-module.exports = { add, all, waiting, reconcile, forgetAccount, FILE };
+// Merge fields into one entry (e.g. the thread id found later).
+function patch(id, fields) {
+  const list = load();
+  const e = list.find((x) => x.id === id);
+  if (!e) return null;
+  Object.assign(e, fields);
+  save(list);
+  return e;
+}
+
+module.exports = { add, all, waiting, reconcile, forgetAccount, patch, FILE };

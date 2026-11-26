@@ -285,10 +285,128 @@ const remindRows = document.getElementById('remindRows');
 const remindErrs = document.getElementById('remindErrs');
 const remindEmpty = document.getElementById('remindEmpty');
 const remindCount = document.getElementById('remindCount');
+const repliesNew = document.getElementById('repliesNew');
+const repliesSeen = document.getElementById('repliesSeen');
+const notifyOn = document.getElementById('notifyOn');
+const replyNote = document.getElementById('replyNote');
+const baseTitle = document.title;
 const remindSub = document.getElementById('remindSub');
 const remindCheck = document.getElementById('remindCheck');
 const draftsDue = document.getElementById('draftsDue');
 let remindToastShown = false;
+
+// "Jane Doe <jane@x.com>" -> "Jane Doe"; a bare address stays as it is.
+function senderName(from) {
+  const m = String(from || '').match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>/);
+  return m ? m[1].trim() || m[2] : String(from || 'someone');
+}
+
+// ---------- Replies: badge, desktop notification ----------
+// Each unread reply raises one desktop notification per browser (remembered in
+// localStorage) and stays on the Drafts tab badge until marked read.
+const NOTIFIED_KEY = 'autoemail.notifiedReplies';
+function notifiedSet() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+function rememberNotified(set) {
+  try {
+    localStorage.setItem(NOTIFIED_KEY, JSON.stringify([...set].slice(-500)));
+  } catch {
+    /* private window: notify again next load */
+  }
+}
+const canNotify = () => 'Notification' in window && window.isSecureContext;
+
+function openDrafts() {
+  window.focus();
+  document.querySelector('.tabs button[data-tab="drafts"]').click();
+}
+
+function desktopAlert(fresh) {
+  if (!canNotify() || Notification.permission !== 'granted' || !fresh.length) return;
+  const show = (title, body, tag) => {
+    try {
+      const n = new Notification(title, { body, tag, icon: '/favicon.svg' });
+      n.onclick = () => {
+        openDrafts();
+        n.close();
+      };
+    } catch {
+      /* some browsers only notify from a service worker */
+    }
+  };
+  if (fresh.length <= 3)
+    for (const x of fresh) show(`Reply from ${senderName(x.from)}`, `${x.subject || '(no subject)'}\nIn ${x.account}`, `reply-${x.id}`);
+  else show(`${fresh.length} new replies`, fresh.map((x) => senderName(x.from)).slice(0, 4).join(', '), 'replies');
+}
+
+function renderReplies(rp) {
+  if (!rp) return;
+  const k = rp.unread.length;
+  repliesNew.hidden = !k;
+  repliesNew.textContent = k ? `${k} new repl${k === 1 ? 'y' : 'ies'}` : '';
+  document.title = k ? `(${k}) ${baseTitle}` : baseTitle;
+  repliesSeen.hidden = !k;
+
+  const seen = notifiedSet();
+  const fresh = rp.unread.filter((x) => !seen.has(x.id));
+  if (fresh.length) {
+    desktopAlert(fresh);
+    showToast({
+      kicker: 'New reply',
+      title: fresh.length === 1 ? `From ${senderName(fresh[0].from)}` : `${fresh.length} new replies`,
+      body: fresh.length === 1 ? `${fresh[0].subject || '(no subject)'}, in ${fresh[0].account}` : 'See Drafted emails in the Drafts tab.',
+    });
+    fresh.forEach((x) => seen.add(x.id));
+    rememberNotified(seen);
+  }
+
+  const reconnect = rp.mailboxes.filter((m) => m.needsReconnect).map((m) => m.email);
+  const failing = rp.mailboxes.filter((m) => m.error);
+  const notes = [];
+  if (reconnect.length)
+    notes.push(`To notice replies, connect ${reconnect.join(', ')} again (Connect Gmail): the app needs one more permission, to read the sender and subject of new mail. It never reads message text.`);
+  for (const m of failing) notes.push(`Replies in ${m.email} could not be checked: ${m.error}`);
+  replyNote.textContent = notes.join(' ');
+  replyNote.hidden = !notes.length;
+
+  if (!canNotify()) {
+    notifyOn.hidden = true;
+    if (!('Notification' in window)) return;
+    if (!notes.length) {
+      replyNote.textContent = 'Desktop alerts work only when this page is opened at http://localhost (for example through the SSH tunnel).';
+      replyNote.hidden = false;
+    }
+  } else notifyOn.hidden = Notification.permission !== 'default';
+}
+
+notifyOn.addEventListener('click', async () => {
+  try {
+    const p = await Notification.requestPermission();
+    notifyOn.hidden = p !== 'default';
+    showToast(
+      p === 'granted'
+        ? { kicker: 'Desktop alerts on', title: 'You will be told about replies', body: 'Keep this page open in a tab.' }
+        : { kicker: 'Desktop alerts off', title: 'The browser blocked them', body: "Allow notifications in this site's settings to turn them on.", tone: 'bad' }
+    );
+  } catch {
+    /* old browsers */
+  }
+});
+
+repliesSeen.addEventListener('click', async () => {
+  repliesSeen.disabled = true;
+  try {
+    await fetch('/api/replies/seen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    await loadReminders();
+  } finally {
+    repliesSeen.disabled = false;
+  }
+});
 
 // An address that may wrap only before its @.
 const atBreak = (addr) => esc(addr).replace('@', '<wbr>@');
@@ -314,27 +432,46 @@ function renderReminders(r) {
   const done = r.done || [];
   const row = (d, isDone, first) => {
     const old = !isDone && Date.now() - Date.parse(d.createdAt) > 86400000;
-    const status = isDone
-      ? '<span class="d-status">Sent or deleted</span>'
-      : `<span class="d-status ${old ? 'is-old' : 'is-waiting'}" title="${old ? 'Waiting more than a day' : 'In Drafts, not sent yet'}">Waiting</span>`;
+    const rp = d.replies;
+    const status = rp && rp.unread
+      ? `<span class="d-status is-reply-new" title="${rp.unread} unread repl${rp.unread === 1 ? 'y' : 'ies'}">New reply</span>`
+      : rp
+        ? '<span class="d-status is-reply">Replied</span>'
+        : isDone
+          ? '<span class="d-status">Sent or deleted</span>'
+          : `<span class="d-status ${old ? 'is-old' : 'is-waiting'}" title="${old ? 'Waiting more than a day' : 'In Drafts, not sent yet'}">Waiting</span>`;
+    const replyLine = rp
+      ? `<span class="d-reply">Reply from ${esc(senderName(rp.last.from))}, ${agoText(rp.last.at)}${rp.count > 1 ? ` (${rp.count} replies)` : ''}${rp.last.snippet ? `: ${esc(rp.last.snippet)}` : ''}</span>`
+      : '';
     const p = d.post;
     const title = p ? esc(p.title || '(untitled)') : '';
     const post = !p
       ? '<span class="auto-dim">Not from a post</span>'
       : `${p.url ? `<a class="title-clamp" href="${esc(p.url)}" target="_blank" rel="noopener" title="${title}">${title}</a>` : `<span class="title-clamp">${title}</span>`}<span class="d-area">${esc([p.place, p.posted ? 'posted ' + p.posted : ''].filter(Boolean).join(', '))}</span>`;
-    return `<tr class="${[isDone ? 'is-done' : '', first ? 'group-start' : ''].filter(Boolean).join(' ')}">
+    return `<tr class="${[isDone && !rp ? 'is-done' : '', rp && rp.unread ? 'is-new-reply' : '', first ? 'group-start' : ''].filter(Boolean).join(' ')}">
       <td>${status}</td>
       <td class="d-when" title="${esc(new Date(d.createdAt).toLocaleString())}">${clockText(d.createdAt)}</td>
       <td class="d-post">${post}</td>
-      <td class="d-subj">${esc(d.subject || '(no subject)')}</td>
+      <td class="d-subj">${esc(d.subject || '(no subject)')}${replyLine}</td>
       <td class="d-to" title="${esc(d.to)}">${atBreak(/@res\.craigslist\.org$/i.test(d.to) ? shortRelay(d.to) : d.to)}</td>
       <td class="d-box">${atBreak(d.account)}</td>
     </tr>`;
   };
+  // Unread replies on top, then waiting drafts, then sent or deleted.
+  const fresh = [...r.waiting.map((d) => [d, false]), ...done.map((d) => [d, true])]
+    .filter(([d]) => d.replies && d.replies.unread)
+    .sort((a, b) => String(b[0].replies.last.at).localeCompare(String(a[0].replies.last.at)));
+  const isFresh = (d) => d.replies && d.replies.unread;
+  const waitRest = r.waiting.filter((d) => !isFresh(d));
+  const doneRest = done.filter((d) => !isFresh(d));
   remindRows.innerHTML =
-    r.waiting.map((d) => row(d, false, false)).join('') + done.map((d, i) => row(d, true, i === 0 && r.waiting.length > 0)).join('');
+    fresh.map(([d, isDone]) => row(d, isDone, false)).join('') +
+    waitRest.map((d, i) => row(d, false, i === 0 && fresh.length > 0)).join('') +
+    doneRest.map((d, i) => row(d, true, i === 0 && fresh.length + waitRest.length > 0)).join('');
   remindEmpty.hidden = r.waiting.length + done.length > 0;
-  remindCount.textContent = `${n} waiting, ${done.length} sent or deleted`;
+  const replied = [...r.waiting, ...done].filter((d) => d.replies).length;
+  remindCount.textContent = `${n} waiting, ${done.length} sent or deleted${replied ? `, ${replied} replied` : ''}`;
+  renderReplies(r.replies);
 
   if (n && !remindToastShown) {
     remindToastShown = true;
@@ -367,7 +504,7 @@ remindCheck.addEventListener('click', async () => {
   }
 });
 loadReminders();
-setInterval(loadReminders, 60000);
+setInterval(loadReminders, 30000);
 
 // ---------- Automatic drafts ----------
 // The server picks the mailbox for each new no-phone post under strict

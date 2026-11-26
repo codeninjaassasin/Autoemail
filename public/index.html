@@ -24,7 +24,7 @@
         </a>
         <nav class="tabs" aria-label="Sections">
           <button type="button" data-tab="scraper" class="active">Scraper</button>
-          <button type="button" data-tab="drafts">Drafts <span class="tabcount" id="draftsDue" hidden></span></button>
+          <button type="button" data-tab="drafts">Drafts <span class="tabcount" id="draftsDue" hidden></span><span class="tabcount tabcount--reply" id="repliesNew" hidden></span></button>
           <button type="button" data-tab="storage">Storage</button>
         </nav>
         <div class="livestrip" id="livestrip" role="status" aria-label="Run state">
@@ -243,9 +243,14 @@
                 <div class="remindhead">
                   <h2 id="remindHead">Drafted emails</h2>
                   <span class="rowcount" id="remindCount"></span>
-                  <button id="remindCheck" class="btn btn--quiet btn--sm" type="button">Check now</button>
+                  <span class="remind-acts">
+                    <button id="notifyOn" class="btn btn--quiet btn--sm" type="button" hidden>Turn on desktop alerts</button>
+                    <button id="repliesSeen" class="btn btn--quiet btn--sm" type="button" hidden>Mark replies read</button>
+                    <button id="remindCheck" class="btn btn--quiet btn--sm" type="button">Check now</button>
+                  </span>
                 </div>
                 <p class="remind-sub" id="remindSub">Drafts made here stay unsent until you send them yourself from Gmail.</p>
+                <p class="remind-sub reply-note" id="replyNote" hidden></p>
                 <ul class="remind-errs" id="remindErrs"></ul>
                 <div class="tablewrap draftswrap">
                   <table class="drafts-table">
