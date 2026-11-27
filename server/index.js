@@ -72,9 +72,15 @@ app.get('/admin/login', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.type('html').send(renderView('login.html', LOGIN_TEXT));
 });
-app.post('/admin/login', (req, res) => {
+app.post('/admin/login', async (req, res) => {
   const b = req.body || {};
-  const out = auth.login(req, res, String(b.password || ''));
+  let out;
+  try {
+    out = await auth.login(req, res, String(b.password || ''));
+  } catch (err) {
+    console.error('[admin] sign-in failed:', err.message);
+    out = { status: 500, error: 'Sign-in failed on the server.' };
+  }
   if (!out.ok) return res.status(out.status).json({ ok: false, error: out.error });
   res.json({ ok: true, next: safeNext(b.next, LOGIN_TEXT.DEFAULT_NEXT) });
 });
@@ -638,6 +644,9 @@ if (missing.length) {
     `Warning: missing env vars: ${missing.join(', ')}. Copy .env.example to .env and fill in your OAuth credentials before connecting accounts. See README.md for setup steps.`
   );
 }
+
+// Move a legacy ADMIN_PASSWORD from .env into data/admin.json (hashed), once.
+require('./adminPassword').migrateFromEnv().catch((err) => console.error('[admin] password migration failed:', err.message));
 
 app.listen(config.port, () => {
   console.log(`Autoemail running at http://localhost:${config.port}`);
