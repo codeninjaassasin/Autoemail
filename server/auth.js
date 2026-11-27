@@ -4,8 +4,9 @@
 // - Members: anyone on the network uses the app without a password. Each
 //   browser gets a member session automatically (cookie `ae_session`), so the
 //   admin can see who is using the app and block a device.
-// - Admin: /admin (session management) needs ADMIN_PASSWORD from .env, signed
-//   in at /admin/login (cookie `ae_admin`, separate from the member cookie).
+// - Admin: /admin (session management) needs the admin password, kept hashed
+//   in data/admin.json (server/adminPassword.js), signed in at /admin/login
+//   (cookie `ae_admin`, separate from the member cookie).
 // The server stores only a SHA-256 hash of each token (data/sessions.json), so
 // the file alone can't be used to sign in. Blocking works per browser: a
 // blocked device that clears its cookies gets a new session.
@@ -13,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const adminPassword = require('./adminPassword');
 
 const FILE = path.join(__dirname, '..', 'data', 'sessions.json');
 const MEMBER_COOKIE = 'ae_session';
@@ -77,11 +79,6 @@ process.on('exit', () => {
 });
 
 // Constant-time password check (compares hashes so lengths always match).
-function passwordMatches(given, expected) {
-  if (!expected) return false;
-  return crypto.timingSafeEqual(Buffer.from(sha256(given), 'hex'), Buffer.from(sha256(expected), 'hex'));
-}
-
 function clientIp(req) {
   return String(req.ip || (req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
 }
@@ -176,12 +173,11 @@ function memberOf(req, res) {
 }
 
 // Admin sign-in. Returns { ok } or { error, status }.
-function login(req, res, password) {
+async function login(req, res, password) {
   const ip = clientIp(req);
   if (lockedOut(ip)) return { status: 429, error: 'Too many wrong passwords. Try again in a few minutes.' };
-  const expected = process.env.ADMIN_PASSWORD;
-  if (!expected) return { status: 500, error: 'ADMIN_PASSWORD is not set in .env.' };
-  if (!passwordMatches(password, expected)) {
+  if (!adminPassword.isSet()) return { status: 500, error: 'No admin password is set. Run: npm run admin-password' };
+  if (!(await adminPassword.verify(password))) {
     noteFailure(ip);
     return { status: 401, error: 'Wrong password.' };
   }

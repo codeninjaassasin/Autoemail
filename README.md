@@ -119,13 +119,11 @@ Then add that exact string to the provider's authorized redirect URIs. Match on 
 
 The app at `/` is open to everyone on your network — no password. Each browser gets its own member session (a cookie), so you can see who is using it. A member sees only the **Scraper** tab with the **scraped** records (posts not scraped yet, and the *Scraped* filter, are hidden). The **Drafts**, **Analytics** and **Storage** tabs, the *Desktop alerts* toggle, and posts not scraped yet are for the admin only; the server refuses their APIs (`401`) to anyone else, including Gmail connect.
 
-Sign in as admin with **Admin sign in** in the top bar (it opens `/admin/login` and returns to the app), using the admin password from `.env`. That browser then sees everything, in the app and at `/admin`, and stays signed in: the admin session ends only after 90 days without a visit (each page load renews it), or when you sign out at `/admin`.
+Sign in as admin with **Admin sign in** in the top bar (it opens `/admin/login` and returns to the app), using the admin password. That browser then sees everything, in the app and at `/admin`, and stays signed in: the admin session ends only after 90 days without a visit (each page load renews it), or when you sign out at `/admin`.
 
-```
-ADMIN_PASSWORD='...'
-```
+The admin password is stored in `data/admin.json` as a salted scrypt hash, never as plain text, and that file is readable only by the app's user. To set or reset it, run `npm run admin-password` on the server (it asks twice, without echoing), or pipe it in: `printf '%s\n' 'new password' | npm run admin-password` (at least 8 characters). The change applies to the next sign-in; browsers already signed in as admin stay signed in. An older install that still has `ADMIN_PASSWORD` in `.env` gets it hashed into `data/admin.json` on its first start; then delete the line from `.env` (the server ignores it after that and warns until it's gone).
 
-Wrap the value in single quotes if it contains `#` or spaces. `/admin` lists every member and admin session (device, IP, first seen, last active). **Block** turns a member browser's access off until you unblock it (it sees an "access turned off" page); **Remove** forgets a session; admin sessions can be signed out. A blocked browser that clears its cookies comes back as a new member, so blocking is a speed bump, not real security. Sessions live in `data/sessions.json`, which stores only a hash of each token. After 8 wrong admin passwords from one IP, that IP must wait 10 minutes.
+`/admin` lists every member and admin session (device, IP, first seen, last active). **Block** turns a member browser's access off until you unblock it (it sees an "access turned off" page); **Remove** forgets a session; admin sessions can be signed out. A blocked browser that clears its cookies comes back as a new member, so blocking is a speed bump, not real security. Sessions live in `data/sessions.json`, which stores only a hash of each token. After 8 wrong admin passwords from one IP, that IP must wait 10 minutes.
 
 ## Notes
 
