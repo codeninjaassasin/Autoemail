@@ -11,7 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const FILE = path.join(__dirname, '..', '..', 'data', 'drafts.json');
-const KEEP_GONE_DAYS = 30;
+const KEEP_GONE_DAYS = 365; // Analytics counts drafts per day from this log
 
 function load() {
   try {

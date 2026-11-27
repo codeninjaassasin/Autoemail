@@ -120,4 +120,9 @@ function changesSince(since, clientEpoch) {
   return { epoch, rev, full: false, rows: changed.filter(isListed), removed: changed.filter((p) => !isListed(p)).map((p) => p.url) };
 }
 
-module.exports = { seen, find, update, listed, flush, changesSince, FILE };
+// Every post ever seen, listed or not (Analytics).
+function all() {
+  return [...load().values()];
+}
+
+module.exports = { seen, find, update, listed, all, flush, changesSince, FILE };

@@ -41,9 +41,9 @@ function params() {
   const p = (settings.get().prefs || {}).params || {};
   return {
     replyWaitMs: Math.max(4000, Math.min((Number(p.replyWait) || 25) * 1000, 120000)),
-    // Capped: with racing, an exit that can't load the page in 25 s is better
-    // swapped for the next proxy than waited on.
-    pageTimeoutMs: Math.min(25000, p.pageTimeout === undefined || p.pageTimeout === '' ? 60000 : Math.max(0, Number(p.pageTimeout) || 0) * 1000 || 25000),
+    // The saved page timeout, held between 30 and 60 s: free exits are slow,
+    // and cutting them at 25 s charged working proxies with a failure.
+    pageTimeoutMs: Math.min(60000, Math.max(30000, p.pageTimeout === undefined || p.pageTimeout === '' ? 60000 : (Number(p.pageTimeout) || 60) * 1000)),
     maxProxies: Math.max(10, Math.min(Number(p.maxProxiesPerPost) || 100, 2000)),
     blockCooldownMs: 600000,
     // No display (server/VM): a visible browser cannot open.
@@ -69,16 +69,32 @@ async function closeBrowserIfIdle() {
   await b.close().catch(() => {});
 }
 
-// Best usable proxy this job hasn't tried: the one that has returned the most
-// relays, else the pool's own order (elite, then success margin). Re-read every
-// time: the main scrape and the refresh change the pool's verdicts meanwhile.
+// Best usable proxy this job hasn't tried. Proxies on a failing streak (3+
+// failures in a row) wait until the healthy ones are used up. Among the rest:
+// the one that caught a relay most recently, then the most relays, then the
+// shortest failing streak, then the most recent success. Re-read every time:
+// the main scrape and the refresh change the pool's verdicts meanwhile.
+const FAILING_STREAK = 3;
+const ts = (iso) => Date.parse(iso || '') || 0;
+function better(a, b) {
+  return (
+    ts(a.lastRelay) - ts(b.lastRelay) ||
+    (a.relays || 0) - (b.relays || 0) ||
+    (b.consecutiveFails || 0) - (a.consecutiveFails || 0) ||
+    ts(a.lastSuccess) - ts(b.lastSuccess)
+  ) > 0;
+}
 function nextUsable(tried) {
   let best = null;
+  let fallback = null;
   for (const p of proxies.usable()) {
     if (tried.has(p.server)) continue;
-    if (!best || (p.relays || 0) > (best.relays || 0)) best = p;
+    if ((p.consecutiveFails || 0) >= FAILING_STREAK) {
+      if (!fallback || better(p, fallback)) fallback = p;
+    } else if (!best || better(p, best)) best = p;
   }
-  return best ? best.server : null;
+  const pick = best || fallback;
+  return pick ? pick.server : null;
 }
 
 // A proxy can answer 404 itself, so "gone" is only final once a direct fetch agrees.
@@ -180,6 +196,8 @@ async function work(job) {
       else if (NET_ERR.test(note)) proxies.markFail(server);
       else proxies.markSuccess(server);
       if (row.relay) proxies.markRelay(server);
+      // The page loaded cleanly and has no reply button: no proxy will find a relay.
+      const noReply = row.noReply && !gated && !NET_ERR.test(note) && !!row.title;
       const v = job.visits;
       if (row.relay) v.relay++;
       else if (gated) v.captcha++;
@@ -199,6 +217,8 @@ async function work(job) {
         emit({ type: 'post', row: saved });
         if (saved.relay) return finish(job, 'scraped', `Relay caught after ${tried.size} ${tried.size === 1 ? 'proxy' : 'proxies'}.`);
       }
+      if (noReply && !job.finishedAt)
+        return finish(job, stored ? 'partial' : 'no-reply', `This post has no reply button, so it has no relay email to catch.${stored ? ' The phone or email in its text was saved.' : ''}`);
     }
   };
 

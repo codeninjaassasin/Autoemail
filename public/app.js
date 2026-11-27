@@ -1,5 +1,9 @@
 'use strict';
 
+// Admin (signed in at /admin/login) sees everything; a member sees the scraped
+// list only. Set by the loader in index.html from /api/me; the server enforces it.
+const IS_ADMIN = !!window.__IS_ADMIN__;
+
 // ---------- Tabs ----------
 document.querySelectorAll('.tabs button').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -8,6 +12,7 @@ document.querySelectorAll('.tabs button').forEach((btn) => {
     btn.classList.add('active');
     document.getElementById(btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'storage') loadFormat();
+    if (btn.dataset.tab === 'analytics') loadAnalytics();
   });
 });
 
@@ -42,11 +47,12 @@ async function loadAccounts() {
     })
   );
 }
-loadAccounts();
+if (IS_ADMIN) loadAccounts();
 
 // Connecting needs the provider's OAuth client in .env, and the OAuth reply
 // comes back to the redirect address (localhost), so say so before the click.
 (async () => {
+  if (!IS_ADMIN) return;
   let s;
   try {
     s = await (await fetch('/api/connect/status')).json();
@@ -150,7 +156,7 @@ async function loadTemplates() {
   renderTemplates();
   if (autoData) renderAuto(autoData);
 }
-loadTemplates();
+if (IS_ADMIN) loadTemplates();
 
 const tplSnapshot = () =>
   JSON.stringify([tplName.value, subjectEl.value, tplBody.value, [...tplBoxes.querySelectorAll('input:checked')].map((c) => c.value)]);
@@ -280,14 +286,13 @@ fieldBar.addEventListener('click', (e) => {
 
 // ---------- Drafted emails ----------
 // Every draft the app made: still in Drafts (waiting for you to send it), or
-// gone from Drafts (you sent or deleted it). The server checks every 15 minutes.
+// gone from Drafts (counted as sent). The server checks every 5 minutes.
 const remindRows = document.getElementById('remindRows');
 const remindErrs = document.getElementById('remindErrs');
 const remindEmpty = document.getElementById('remindEmpty');
 const remindCount = document.getElementById('remindCount');
 const repliesNew = document.getElementById('repliesNew');
 const repliesSeen = document.getElementById('repliesSeen');
-const notifyOn = document.getElementById('notifyOn');
 const replyNote = document.getElementById('replyNote');
 const baseTitle = document.title;
 const remindSub = document.getElementById('remindSub');
@@ -301,47 +306,116 @@ function senderName(from) {
   return m ? m[1].trim() || m[2] : String(from || 'someone');
 }
 
-// ---------- Replies: badge, desktop notification ----------
-// Each unread reply raises one desktop notification per browser (remembered in
-// localStorage) and stays on the Drafts tab badge until marked read.
+// ---------- Desktop alerts: new drafts to send, and replies ----------
+// Switched on with the "Desktop alerts" toggle in the top bar (per browser).
+// Each new draft raises one notification asking to send it soon, and each
+// unread reply raises one; both are remembered in localStorage so a reload
+// does not repeat them.
+const ALERTS_KEY = 'autoemail.alerts';
 const NOTIFIED_KEY = 'autoemail.notifiedReplies';
-function notifiedSet() {
+const NOTIFIED_DRAFTS_KEY = 'autoemail.notifiedDrafts';
+const alertsToggle = document.getElementById('alertsToggle');
+function readJson(key, fallback) {
   try {
-    return new Set(JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '[]'));
+    return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback;
   } catch {
-    return new Set();
+    return fallback;
   }
 }
-function rememberNotified(set) {
+function writeJson(key, value) {
   try {
-    localStorage.setItem(NOTIFIED_KEY, JSON.stringify([...set].slice(-500)));
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    /* private window: notify again next load */
+    /* private window: works until reload */
   }
 }
+const notifiedSet = (key = NOTIFIED_KEY) => new Set(readJson(key, []));
+const rememberNotified = (set, key = NOTIFIED_KEY) => writeJson(key, [...set].slice(-500));
 const canNotify = () => 'Notification' in window && window.isSecureContext;
+let alertPref = readJson(ALERTS_KEY, { on: false, since: null });
+const alertsOn = () => !!alertPref.on && canNotify() && Notification.permission === 'granted';
+function paintAlertsToggle() {
+  alertsToggle.checked = alertsOn();
+}
+paintAlertsToggle();
 
 function openDrafts() {
   window.focus();
   document.querySelector('.tabs button[data-tab="drafts"]').click();
 }
+const gmailDrafts = (d) =>
+  d.provider === 'google' ? `https://mail.google.com/mail/u/${encodeURIComponent(d.account)}/#drafts` : 'https://outlook.office.com/mail/drafts';
 
-function desktopAlert(fresh) {
-  if (!canNotify() || Notification.permission !== 'granted' || !fresh.length) return;
-  const show = (title, body, tag) => {
-    try {
-      const n = new Notification(title, { body, tag, icon: '/favicon.svg' });
-      n.onclick = () => {
-        openDrafts();
-        n.close();
-      };
-    } catch {
-      /* some browsers only notify from a service worker */
-    }
-  };
+function notify(title, body, tag, onClick, sticky) {
+  if (!alertsOn()) return;
+  try {
+    const n = new Notification(title, { body, tag, icon: '/favicon.svg', requireInteraction: !!sticky });
+    n.onclick = () => {
+      onClick();
+      n.close();
+    };
+  } catch {
+    /* some browsers only notify from a service worker */
+  }
+}
+
+alertsToggle.addEventListener('change', async () => {
+  if (!alertsToggle.checked) {
+    alertPref = { on: false, since: null };
+    writeJson(ALERTS_KEY, alertPref);
+    showToast({ kicker: 'Desktop alerts off', title: 'No more desktop notifications', body: 'Drafts and replies still show in the Drafts tab.' });
+    return;
+  }
+  if (!canNotify()) {
+    alertsToggle.checked = false;
+    showToast({ kicker: 'Not available here', title: 'Desktop alerts need localhost', body: 'Open this page at http://localhost:4987 (for example through the SSH tunnel), then turn them on.', tone: 'bad' });
+    return;
+  }
+  let p = Notification.permission;
+  if (p === 'default') p = await Notification.requestPermission().catch(() => 'denied');
+  if (p !== 'granted') {
+    alertsToggle.checked = false;
+    showToast({ kicker: 'Desktop alerts off', title: 'The browser blocked them', body: "Allow notifications in this site's settings, then turn the toggle on again.", tone: 'bad' });
+    return;
+  }
+  alertPref = { on: true, since: new Date().toISOString() };
+  writeJson(ALERTS_KEY, alertPref);
+  paintAlertsToggle();
+  notify('Desktop alerts are on', 'You will be told when a draft is ready to send and when someone replies. Keep this page open in a tab.', 'alerts-on', () => window.focus());
+  showToast({ kicker: 'Desktop alerts on', title: 'New drafts and replies will notify you', body: 'Keep this page open in a tab.' });
+});
+
+// A new draft: ask to send it soon. The notification stays until clicked, and
+// opens that mailbox's Drafts in Gmail.
+function alertNewDrafts(waiting) {
+  if (!alertsOn()) return;
+  const since = Date.parse(alertPref.since || 0) || 0;
+  const seen = notifiedSet(NOTIFIED_DRAFTS_KEY);
+  const fresh = waiting.filter((d) => Date.parse(d.createdAt) >= since && !seen.has(d.id));
+  if (!fresh.length) return;
   if (fresh.length <= 3)
-    for (const x of fresh) show(`Reply from ${senderName(x.from)}`, `${x.subject || '(no subject)'}\nIn ${x.account}`, `reply-${x.id}`);
-  else show(`${fresh.length} new replies`, fresh.map((x) => senderName(x.from)).slice(0, 4).join(', '), 'replies');
+    for (const d of fresh)
+      notify(
+        'Draft ready: send it now',
+        `${d.post ? d.post.title : d.subject || '(no subject)'}\nTo ${/@res\.craigslist\.org$/i.test(d.to) ? shortRelay(d.to) : d.to}, from ${d.account}`,
+        `draft-${d.id}`,
+        () => window.open(gmailDrafts(d), '_blank', 'noopener'),
+        true
+      );
+  else notify(`${fresh.length} drafts ready to send`, 'Open Drafts in Gmail and send them soon.', 'drafts', openDrafts, true);
+  showToast({
+    kicker: 'Draft ready',
+    title: fresh.length === 1 ? 'Send it from Gmail soon' : `${fresh.length} drafts ready to send`,
+    body: fresh.length === 1 ? `To ${shortRelay(fresh[0].to)}, in ${fresh[0].account}` : 'See Drafted emails in the Drafts tab.',
+  });
+  fresh.forEach((d) => seen.add(d.id));
+  rememberNotified(seen, NOTIFIED_DRAFTS_KEY);
+}
+
+function alertReplies(fresh) {
+  if (fresh.length <= 3)
+    for (const x of fresh) notify(`Reply from ${senderName(x.from)}`, `${x.subject || '(no subject)'}\nIn ${x.account}`, `reply-${x.id}`, openDrafts);
+  else notify(`${fresh.length} new replies`, fresh.map((x) => senderName(x.from)).slice(0, 4).join(', '), 'replies', openDrafts);
 }
 
 function renderReplies(rp) {
@@ -355,7 +429,7 @@ function renderReplies(rp) {
   const seen = notifiedSet();
   const fresh = rp.unread.filter((x) => !seen.has(x.id));
   if (fresh.length) {
-    desktopAlert(fresh);
+    alertReplies(fresh);
     showToast({
       kicker: 'New reply',
       title: fresh.length === 1 ? `From ${senderName(fresh[0].from)}` : `${fresh.length} new replies`,
@@ -373,30 +447,8 @@ function renderReplies(rp) {
   for (const m of failing) notes.push(`Replies in ${m.email} could not be checked: ${m.error}`);
   replyNote.textContent = notes.join(' ');
   replyNote.hidden = !notes.length;
-
-  if (!canNotify()) {
-    notifyOn.hidden = true;
-    if (!('Notification' in window)) return;
-    if (!notes.length) {
-      replyNote.textContent = 'Desktop alerts work only when this page is opened at http://localhost (for example through the SSH tunnel).';
-      replyNote.hidden = false;
-    }
-  } else notifyOn.hidden = Notification.permission !== 'default';
+  paintAlertsToggle(); // permission may have been revoked in the browser
 }
-
-notifyOn.addEventListener('click', async () => {
-  try {
-    const p = await Notification.requestPermission();
-    notifyOn.hidden = p !== 'default';
-    showToast(
-      p === 'granted'
-        ? { kicker: 'Desktop alerts on', title: 'You will be told about replies', body: 'Keep this page open in a tab.' }
-        : { kicker: 'Desktop alerts off', title: 'The browser blocked them', body: "Allow notifications in this site's settings to turn them on.", tone: 'bad' }
-    );
-  } catch {
-    /* old browsers */
-  }
-});
 
 repliesSeen.addEventListener('click', async () => {
   repliesSeen.disabled = true;
@@ -438,7 +490,7 @@ function renderReminders(r) {
       : rp
         ? '<span class="d-status is-reply">Replied</span>'
         : isDone
-          ? '<span class="d-status">Sent or deleted</span>'
+          ? `<span class="d-status is-sent"${d.goneAt ? ` title="Left Drafts ${esc(new Date(d.goneAt).toLocaleString())}"` : ''}>Sent</span>`
           : `<span class="d-status ${old ? 'is-old' : 'is-waiting'}" title="${old ? 'Waiting more than a day' : 'In Drafts, not sent yet'}">Waiting</span>`;
     const replyLine = rp
       ? `<span class="d-reply">Reply from ${esc(senderName(rp.last.from))}, ${agoText(rp.last.at)}${rp.count > 1 ? ` (${rp.count} replies)` : ''}${rp.last.snippet ? `: ${esc(rp.last.snippet)}` : ''}</span>`
@@ -470,8 +522,9 @@ function renderReminders(r) {
     doneRest.map((d, i) => row(d, true, i === 0 && fresh.length + waitRest.length > 0)).join('');
   remindEmpty.hidden = r.waiting.length + done.length > 0;
   const replied = [...r.waiting, ...done].filter((d) => d.replies).length;
-  remindCount.textContent = `${n} waiting, ${done.length} sent or deleted${replied ? `, ${replied} replied` : ''}`;
+  remindCount.textContent = [`${n} waiting`, `${done.length} sent`, replied && `${replied} replied`].filter(Boolean).join(', ');
   renderReplies(r.replies);
+  alertNewDrafts(r.waiting);
 
   if (n && !remindToastShown) {
     remindToastShown = true;
@@ -503,8 +556,10 @@ remindCheck.addEventListener('click', async () => {
     remindCheck.removeAttribute('aria-busy');
   }
 });
-loadReminders();
-setInterval(loadReminders, 30000);
+if (IS_ADMIN) {
+  loadReminders();
+  setInterval(loadReminders, 30000);
+}
 
 // ---------- Automatic drafts ----------
 // The server picks the mailbox for each new no-phone post under strict
@@ -670,8 +725,10 @@ autoRows.addEventListener('change', async (e) => {
     loadAuto();
   }
 });
-loadAuto();
-setInterval(loadAuto, 30000);
+if (IS_ADMIN) {
+  loadAuto();
+  setInterval(loadAuto, 30000);
+}
 
 // ---------- Multiselect component ----------
 function makeMultiselect(el, items, { valueKey, labelFn, allowAdd, onChange = () => {} }) {
@@ -1048,10 +1105,49 @@ function fmtDur(ms) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return `${h ? h + 'h ' : ''}${m ? m + 'm ' : ''}${s % 60}s`;
 }
+// Success rate of the last post visits (server: accuracy()). Low: the card
+// turns red with the cause, and the top bar shows an alert.
+// Why it is low: the failing share, named, so it never reads as the rate itself.
+const RATE_CAUSE = {
+  proxies: [(a) => `${Math.round((a.net / a.tries) * 100)}% proxy errors`, 'Most visits fail because the proxy cannot load the post. Refresh proxies or wait for verified ones.'],
+  captcha: [(a) => `${Math.round((a.gated / a.tries) * 100)}% captcha`, 'Most visits hit a captcha. Proxies are being cooled; fewer workers may help.'],
+  none: [() => 'pages load, nothing found', 'Pages load but no contact shows. Check the reply wait time.'],
+};
+function renderAccuracy(s) {
+  const a = s.accuracy;
+  const card = document.getElementById('stat-rate');
+  const val = document.getElementById('t-rate');
+  const why = document.getElementById('t-rate-why');
+  const alertEl = document.getElementById('bar-alert');
+  if (!a || !a.tries) {
+    val.textContent = '–';
+    card.classList.remove('is-low');
+    why.hidden = true;
+    alertEl.hidden = true;
+    return;
+  }
+  const pct = Math.round(a.rate * 1000) / 10;
+  const caught = a.relay + a.contact;
+  val.textContent = `${pct}%`;
+  const detail = `Success rate: ${pct}% of the last ${a.tries} visits caught a contact. ${a.relay} relays, ${a.contact} phone or email only, ${a.net} proxy failures, ${a.gated} captcha, ${a.noReply} no reply button, ${a.tries - caught - a.net - a.gated - a.noReply} nothing caught.`;
+  card.title = detail;
+  const low = a.low && s.running;
+  card.classList.toggle('is-low', low);
+  why.hidden = !low;
+  const [cause, advice] = RATE_CAUSE[a.cause] || [() => '', ''];
+  why.textContent = low ? cause(a) : '';
+  if (low) card.title = `${detail} ${advice}`;
+  alertEl.hidden = !low;
+  if (low) {
+    alertEl.innerHTML = `Low success <b>${pct}%</b>`;
+    alertEl.title = `${detail} ${advice}`;
+  }
+}
+
 async function pollStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
-    document.getElementById('t-status').textContent = s.running ? 'running' : 'idle';
+    document.getElementById('t-status').textContent = s.running ? 'Running' : 'Idle';
     document.getElementById('tracer').classList.toggle('running', !!s.running);
     if (typeof setRunButtons === 'function') setRunButtons(!!s.running);
     if ((s.running || s.refresh.running || (s.postScrapes && s.postScrapes.active)) && typeof attachEvents === 'function') attachEvents();
@@ -1060,7 +1156,8 @@ async function pollStatus() {
     // topbar live strip
     const strip = document.getElementById('livestrip');
     strip.classList.toggle('running', !!s.running);
-    document.getElementById('bar-status').textContent = s.running ? 'running' : 'idle';
+    document.getElementById('bar-status').textContent = s.running ? 'Running' : 'Idle';
+    renderAccuracy(s);
     document.getElementById('bar-workers').textContent = `${s.activeWorkers}/${s.concurrency}`;
     document.getElementById('bar-queue').textContent = s.queueRemaining;
     document.getElementById('bar-stored').textContent = s.stored;
@@ -1135,8 +1232,52 @@ let catFilter = (prefs.filters && prefs.filters.category) || '';
 const freshFilterEl = document.getElementById('freshFilter');
 let freshFilter = (prefs.filters && prefs.filters.freshness) || '';
 freshFilterEl.value = freshFilter;
+// Posted date range (calendar inputs), as local days. The bounds in ms go to
+// the server too, for the relay refresh scope.
+const dateFromEl = document.getElementById('dateFrom');
+const dateToEl = document.getElementById('dateTo');
+const dateClearEl = document.getElementById('dateClear');
+let dateFrom = (prefs.filters && prefs.filters.dateFrom) || '';
+let dateTo = (prefs.filters && prefs.filters.dateTo) || '';
+dateFromEl.value = dateFrom;
+dateToEl.value = dateTo;
+function dayStart(v, next = 0) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || '');
+  return m ? new Date(+m[1], +m[2] - 1, +m[3] + next).getTime() : null;
+}
+const dayEnd = (v) => (dayStart(v) === null ? null : dayStart(v, 1) - 1);
+let postedFrom = dayStart(dateFrom);
+let postedTo = dayEnd(dateTo);
+function onDateChange() {
+  dateFrom = dateFromEl.value;
+  dateTo = dateToEl.value;
+  if (dateFrom && dateTo && dateFrom > dateTo) [dateFrom, dateTo] = [dateTo, dateFrom];
+  dateFromEl.value = dateFrom;
+  dateToEl.value = dateTo;
+  dateToEl.min = dateFrom || '';
+  dateFromEl.max = dateTo || '';
+  postedFrom = dayStart(dateFrom);
+  postedTo = dayEnd(dateTo);
+  dateClearEl.hidden = !dateFrom && !dateTo;
+  saveFilters();
+  renderRows();
+}
+dateClearEl.hidden = !dateFrom && !dateTo;
+dateFromEl.addEventListener('change', onDateChange);
+dateToEl.addEventListener('change', onDateChange);
+dateClearEl.addEventListener('click', () => {
+  dateFromEl.value = '';
+  dateToEl.value = '';
+  onDateChange();
+});
+function matchesPosted(r) {
+  if (postedFrom === null && postedTo === null) return true;
+  const t = r.postedAt ? Date.parse(r.postedAt) : NaN;
+  if (!Number.isFinite(t)) return false;
+  return (postedFrom === null || t >= postedFrom) && (postedTo === null || t <= postedTo);
+}
 function saveFilters() {
-  savePrefs({ filters: { state: stateFilter, city: cityFilter, phoneOnly, category: catFilter, freshness: freshFilter } });
+  savePrefs({ filters: { state: stateFilter, city: cityFilter, phoneOnly, category: catFilter, freshness: freshFilter, dateFrom, dateTo, postedFrom, postedTo } });
   pushRefreshScope();
 }
 
@@ -1343,13 +1484,16 @@ function rowHtml(r) {
   // Rows are addressed by id (contacts) or url (listed posts not scraped yet).
   const key = r.id ? `data-id="${r.id}"` : `data-url="${esc(r.url)}"`;
   const sentCell = `<input type="checkbox" class="sent-cb" ${key} ${r.sent ? 'checked' : ''} aria-label="Mark sent"/>`;
-  const job = r.unscraped ? postJobs.get(r.url) : null;
-  const checked = !r.unscraped
-    ? fmtChecked(r)
-    : job
-      ? `<span class="post-scraping">Scraping… ${job.tried} ${job.tried === 1 ? 'proxy' : 'proxies'}</span>`
+  // A running job keeps its progress and stop button even after a visit stored
+  // the ad's phone (the row is then no longer "not scraped").
+  const job = r.url ? postJobs.get(r.url) : null;
+  const checked = job
+    ? `<span class="post-scraping">Scraping… ${job.tried} ${job.tried === 1 ? 'proxy' : 'proxies'}</span>`
+    : !r.unscraped
+      ? fmtChecked(r)
       : '<span class="posted-none">Not scraped</span>';
-  const play = r.unscraped && !r.sent ? playButton(r.url, job) : '';
+  // Any unsent post without a relay yet can be scraped now.
+  const play = r.url && !r.sent && (job || !r.relay) ? playButton(r.url, job) : '';
   const flagLabel = r.flagged ? 'Clear the red mark' : 'Mark this row red';
   const del = `<button class="del-row${r.flagged ? ' on' : ''}" ${key} data-flagged="${r.flagged ? 1 : 0}" title="${flagLabel}" aria-label="${flagLabel}" aria-pressed="${r.flagged ? 'true' : 'false'}">✕</button>`;
   const note = r.unscraped ? '' : `${r.captchaBlocked ? 'captcha ' : ''}${r.manual ? 'filled by hand ' : ''}${r.note || ''}`;
@@ -1367,12 +1511,16 @@ function rowHtml(r) {
       <td><span class="row-actions">${play}${del}</span></td></tr>`;
 }
 
-// An automatic draft waits in this mailbox for the person to send by hand.
+// The automatic draft made for this post: Drafted while it waits in Drafts,
+// Sent once it left Drafts (or the row is marked sent).
 function draftChip(r) {
   const d = r.autoDraft;
   if (!d || !d.draftId) return '';
-  const when = d.at ? new Date(d.at).toLocaleString() : '';
-  return `<span class="draft-chip" title="Draft made in ${esc(d.account || '')}${when ? ' on ' + esc(when) : ''}. Review and send it from Gmail.">Drafted</span>`;
+  const when = (iso) => (iso ? new Date(iso).toLocaleString() : '');
+  const box = esc(d.account || '');
+  if (d.status === 'sent' || d.status === 'gone' || r.sent)
+    return `<span class="draft-chip is-sent" title="Sent from ${box}${d.sentAt ? ' (left Drafts ' + esc(when(d.sentAt)) + ')' : ''}.">Sent</span>`;
+  return `<span class="draft-chip" title="Draft made in ${box}${d.at ? ' on ' + esc(when(d.at)) : ''}. Review and send it from Gmail.">Drafted</span>`;
 }
 
 let currentFiltered = [];
@@ -1390,11 +1538,12 @@ function paintRows() {
       (!phoneOnly || (r.phones && r.phones.length > 0)) &&
       (!freshFilter || (!r.sent && !r.unscraped && (r.refreshStatus || 'unchecked') === freshFilter)) && // sent: no freshness
       matchesLocation(r) &&
+      matchesPosted(r) &&
       matchesPhone(r)
   );
   currentFiltered = filtered;
   // A filter change starts the window over at the top; a data change keeps it.
-  const filterKey = [filter, effCat, phoneOnly, freshFilter, stateFilter, cityFilter, phoneQuery].join('|');
+  const filterKey = [filter, effCat, phoneOnly, freshFilter, stateFilter, cityFilter, phoneQuery, postedFrom, postedTo].join('|');
   if (filterKey !== lastFilterKey) {
     lastFilterKey = filterKey;
     renderLimit = PAGE_ROWS;
@@ -1421,7 +1570,7 @@ function paintRows() {
     empty.textContent = all.length
       ? phoneQuery
         ? 'No contacts match this phone number with the current filters. Set the other filters to All to search every record.'
-        : 'No contacts match these filters. Clear the category, state, city, freshness or Has phone filter to see all.'
+        : 'No contacts match these filters. Clear the posted date, category, state, city, freshness or Has phone filter to see all.'
       : 'No posts yet. Pick areas and start a scrape — listed posts appear here, and their contacts fill in as they are scraped.';
   }
 }
@@ -1811,7 +1960,7 @@ function viewRows() {
 
 // --- ▶ Scrape one post now: a temporary server worker using usable proxies ---
 const postJobs = new Map(); // url -> running job (from /api/status, all devices)
-const myPostJobs = new Set(); // urls started on this device: toast their result
+const myPostJobs = new Map(); // url -> start time, for jobs started on this device: toast their result
 let postJobsKey = '';
 const PLAY_ICON = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M5 3.2v9.6L12.6 8z" fill="currentColor"/></svg>';
 const STOP_ICON = '<svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2" fill="currentColor"/></svg>';
@@ -1829,12 +1978,20 @@ const POST_OUTCOMES = {
   gone: ['Listing gone', 'bad'],
   duplicate: ['Duplicate · not stored', 'bad'],
   failed: ['Not scraped', 'bad'],
+  'no-reply': ['No reply button', 'bad'],
   skipped: ['Skipped', 'ok'],
   stopped: ['Stopped', 'ok'],
 };
 function applyPostScrapes(ps) {
   if (!ps) return;
   const running = ps.jobs.filter((j) => !j.finishedAt);
+  // A job this device started that the server no longer knows: it restarted.
+  const known = new Set(ps.jobs.map((j) => j.url));
+  for (const [url, at] of myPostJobs) {
+    if (known.has(url) || Date.now() - at < 8000) continue;
+    myPostJobs.delete(url);
+    showToast({ kicker: 'Interrupted', title: postTitle(url), body: 'The server restarted while this post was being scraped. Press ▶ to try again.', tone: 'bad' });
+  }
   for (const j of ps.jobs) {
     if (!j.finishedAt || !myPostJobs.has(j.url)) continue;
     myPostJobs.delete(j.url);
@@ -1870,7 +2027,7 @@ async function togglePostScrape(btn) {
     myPostJobs.delete(url); // no toast for a stop the user asked for
   } else {
     postJobs.set(url, { url, tried: 0 });
-    myPostJobs.add(url);
+    myPostJobs.set(url, Date.now());
     attachEvents();
   }
   postJobsKey = '';
@@ -1882,9 +2039,9 @@ async function togglePostScrape(btn) {
 const PENCIL_ICON =
   '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M11.2 2.3l2.5 2.5-7.9 7.9-3.1.6.6-3.1z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
 function pencilCell(r, field) {
-  if (r.sent) return '<span class="posted-none">–</span>';
+  if (r.sent) return `<span class="posted-none">${r.unscraped ? 'Not scraped' : '–'}</span>`;
   const label = field === 'relay' ? 'relay email' : 'phone number';
-  return `<span class="manual-slot"><span class="manual-empty">${r.unscraped ? 'not scraped' : '–'}</span><button type="button" class="pencil" data-url="${esc(r.url)}" data-field="${field}" title="Fill ${label} by hand" aria-label="Fill ${label} by hand">${PENCIL_ICON}</button></span>`;
+  return `<span class="manual-slot"><span class="manual-empty">${r.unscraped ? 'Not scraped' : '–'}</span><button type="button" class="pencil" data-url="${esc(r.url)}" data-field="${field}" title="Fill ${label} by hand" aria-label="Fill ${label} by hand">${PENCIL_ICON}</button></span>`;
 }
 function openManualEditor(btn) {
   const td = btn.closest('td');
