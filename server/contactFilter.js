@@ -25,7 +25,14 @@ function makeFilter(prefs = {}, rows = null) {
   const state = f.state || '';
   const city = String(f.city || '').toLowerCase();
   const phone = String(prefs.phone || '').replace(/\D/g, ''); // phone search digits
+  // Posted date range: local-day bounds in ms, computed by the page.
+  const from = Number.isFinite(Number(f.postedFrom)) && f.postedFrom !== null && f.postedFrom !== '' ? Number(f.postedFrom) : null;
+  const to = Number.isFinite(Number(f.postedTo)) && f.postedTo !== null && f.postedTo !== '' ? Number(f.postedTo) : null;
   return (r) => {
+    if (from !== null || to !== null) {
+      const t = r.postedAt ? Date.parse(r.postedAt) : NaN;
+      if (!Number.isFinite(t) || (from !== null && t < from) || (to !== null && t > to)) return false;
+    }
     if (phone && !(r.phones || []).some((p) => String(p).replace(/\D/g, '').includes(phone))) return false;
     if (sent === 'sent' && !r.sent) return false;
     if (sent === 'unsent' && r.sent) return false;
@@ -44,7 +51,7 @@ function makeFilter(prefs = {}, rows = null) {
 // True when no filter narrows the list.
 function isUnfiltered(prefs = {}) {
   const f = prefs.filters || {};
-  return (prefs.sentFilter || 'all') === 'all' && !f.category && !f.phoneOnly && !f.freshness && !f.state && !f.city && !prefs.phone;
+  return (prefs.sentFilter || 'all') === 'all' && !f.category && !f.phoneOnly && !f.freshness && !f.state && !f.city && !prefs.phone && f.postedFrom == null && f.postedTo == null;
 }
 
 module.exports = { makeFilter, isUnfiltered };

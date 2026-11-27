@@ -19,7 +19,9 @@ const MEMBER_COOKIE = 'ae_session';
 const ADMIN_COOKIE = 'ae_admin';
 const MEMBER_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; // cookie lifetime
 const MEMBER_IDLE_DROP_MS = 30 * 24 * 60 * 60 * 1000; // forget members idle this long (unless blocked)
-const ADMIN_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+// An admin stays signed in while the browser keeps using the app: the session
+// ends only after this long without a visit (the cookie is renewed on each page load).
+const ADMIN_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 const TOUCH_EVERY_MS = 60 * 1000; // lastSeenAt is updated at most once a minute
 const FAIL_WINDOW_MS = 10 * 60 * 1000;
 const FAIL_LIMIT = 8; // wrong admin passwords per IP per window before a lockout
@@ -148,7 +150,7 @@ function adminOf(req) {
   const hash = sha256(token);
   const s = load().get(hash);
   if (!s || s.role !== 'admin') return null;
-  if (Date.now() - Date.parse(s.createdAt) > ADMIN_MAX_AGE_MS) {
+  if (Date.now() - Date.parse(s.lastSeenAt || s.createdAt) > ADMIN_MAX_AGE_MS) {
     sessions.delete(hash);
     saveSoon();
     return null;
@@ -252,10 +254,14 @@ div{max-width:420px;text-align:center}h1{font-size:20px;margin:0 0 8px}p{margin:
 // - /admin and /api/admin/*: admin session required.
 // - everything else: open; the browser gets a member session, and a blocked
 //   member is refused (an admin session overrides a block on the same browser).
+//   Admin-only parts of the app (drafts, analytics, storage, unscraped posts)
+//   are checked in server/index.js with req.admin.
 function guard(req, res, next) {
   if (req.path === LOGIN_PAGE) return next();
   const admin = adminOf(req);
   req.admin = admin;
+  // Keep a signed-in admin signed in: renew the cookie on every page load.
+  if (admin && !ASSET.test(req.path) && !req.path.startsWith('/api/')) addCookie(res, ADMIN_COOKIE, parseCookies(req)[ADMIN_COOKIE], ADMIN_MAX_AGE_MS);
   const wantsAdmin = req.path === '/admin' || req.path.startsWith('/api/admin/');
   if (wantsAdmin) {
     if (admin) return next();

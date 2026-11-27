@@ -218,4 +218,8 @@ function start() {
   timer.unref();
 }
 
-module.exports = { start, check, summary, byLog, markSeen, forgetAccount, isReply, FILE };
+function all() {
+  return state.replies.slice();
+}
+
+module.exports = { start, check, summary, byLog, all, markSeen, forgetAccount, isReply, FILE };

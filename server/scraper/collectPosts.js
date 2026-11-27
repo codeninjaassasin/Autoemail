@@ -72,7 +72,7 @@ async function collectPosts(_ctx, { area, category, query, cap = PER_AREA_CAP, t
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
     try {
-      const { status, html } = await httpGet(searchUrl(area, category, query), { timeout: 0 }); // no timeout
+      const { status, html } = await httpGet(searchUrl(area, category, query), { timeout: 30000 }); // a hung fetch must not stall every other area
       if (isBlocked(status, html)) return { urls: [], blocked: true, error: null };
       if (status !== 200) throw new Error(`http ${status}`);
       const urls = listingUrls(html, area, cap);

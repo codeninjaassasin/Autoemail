@@ -328,7 +328,12 @@ function setFlags(id, flags = {}) {
   load();
   const row = byId.get(id);
   if (!row) return null;
-  if (flags.sent !== undefined) row.sent = !!flags.sent;
+  if (flags.sent !== undefined) {
+    // For Analytics (sent per day): now, or the time given (a draft that left Drafts).
+    if (flags.sent && !row.sent) row.sentAt = flags.sentAt || new Date().toISOString();
+    if (!flags.sent) delete row.sentAt;
+    row.sent = !!flags.sent;
+  } else if (flags.sentAt && row.sent) row.sentAt = flags.sentAt;
   if (flags.flagged !== undefined) {
     if (flags.flagged) {
       row.flagged = true;
@@ -344,11 +349,12 @@ function setFlags(id, flags = {}) {
 }
 // Records the automatic draft made for a contact (or a failed attempt), so the
 // same post is never drafted twice. `info` null clears it.
-function setAutoDraft(id, info) {
+// `merge` keeps the fields already there (e.g. the draft's later status).
+function setAutoDraft(id, info, merge = false) {
   load();
   const row = byId.get(id);
   if (!row) return null;
-  if (info) row.autoDraft = info;
+  if (info) row.autoDraft = merge && row.autoDraft ? { ...row.autoDraft, ...info } : info;
   else delete row.autoDraft;
   touch(row);
   save();

@@ -12,7 +12,7 @@ const log = require('./log');
 const gmail = require('./gmail');
 const graph = require('./graph');
 
-const CHECK_EVERY_MS = 15 * 60 * 1000;
+const CHECK_EVERY_MS = 5 * 60 * 1000;
 const FIRST_CHECK_MS = 30 * 1000;
 
 const state = { checkedAt: null, checking: null, errors: {} };
@@ -27,6 +27,22 @@ function explain(err) {
   if (/invalid_grant|invalid_token|unauthori[sz]ed|401|reconnect/i.test(msg))
     return 'Access expired or was revoked. Connect this account again.';
   return msg.slice(0, 200);
+}
+
+// A draft that left Drafts counts as sent: its contact is marked sent and the
+// row's chip in the Scraper list turns from Drafted to Sent.
+function settle() {
+  const gone = log.all().filter((e) => e.status === 'gone' && e.contactId);
+  if (!gone.length) return;
+  const byId = new Map(contacts.list().map((c) => [c.id, c]));
+  for (const e of gone) {
+    const c = byId.get(e.contactId);
+    if (!c || !c.autoDraft || c.autoDraft.logId !== e.id) continue;
+    if (c.autoDraft.status !== 'sent') contacts.setAutoDraft(c.id, { status: 'sent', sentAt: e.goneAt || null }, true);
+    // Sent when the draft left Drafts (dated then, not when this check noticed).
+    if (!c.sent) contacts.setFlags(c.id, { sent: true, sentAt: e.goneAt });
+    else if (e.goneAt && c.sentAt && c.sentAt > e.goneAt) contacts.setFlags(c.id, { sentAt: e.goneAt });
+  }
 }
 
 async function checkAccount(account) {
@@ -51,6 +67,7 @@ function check() {
         if (waitingIds.has(account.id)) await checkAccount(account);
         else delete state.errors[account.id];
       }
+      settle();
       state.checkedAt = new Date().toISOString();
     })().finally(() => {
       state.checking = null;
@@ -92,7 +109,7 @@ function summary() {
     .filter((e) => e.status === 'waiting')
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .map(row);
-  // Drafts that left the Drafts folder (sent or deleted by you), newest first.
+  // Drafts that left the Drafts folder (counted as sent), newest first.
   const done = mine
     .filter((e) => e.status !== 'waiting')
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))

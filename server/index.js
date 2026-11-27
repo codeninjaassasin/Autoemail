@@ -51,6 +51,22 @@ function safeNext(next, fallback) {
 // The app is open to everyone (each browser gets a member session); only
 // /admin needs the admin password. See server/auth.js.
 app.use(auth.guard);
+
+// Admin-only parts of the app: Gmail accounts and connecting them, templates,
+// automatic drafts, drafted emails, replies, analytics, the storage format, and
+// listed posts not scraped yet. Members (no password) see the scraped list only.
+const ADMIN_ONLY = /^\/(api\/(accounts|templates|analytics|automation|reminders|replies|db-format|connect|posts)(\/|$)|connect\/|oauth\/)/;
+app.use((req, res, next) => {
+  if (req.admin || !ADMIN_ONLY.test(req.path)) return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, error: 'Admin sign-in required.', admin: true });
+  return res.redirect(302, `${auth.LOGIN_PAGE}?next=/`);
+});
+// Who is asking: the page shows the admin-only tabs only to an admin.
+app.get('/api/me', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ admin: !!req.admin });
+});
+const isScraped = (row) => row && !row.unscraped;
 app.get('/admin/login', (req, res) => {
   if (auth.adminOf(req)) return res.redirect(302, safeNext(req.query.next, LOGIN_TEXT.DEFAULT_NEXT));
   res.set('Cache-Control', 'no-store');
@@ -183,6 +199,13 @@ app.delete('/api/templates/:id', (req, res) => {
 });
 
 // --- Automatic drafts: new no-phone posts -> one draft from the mailbox's template. Never sends. ---
+app.get('/api/analytics', (req, res) => {
+  try {
+    res.json(require('./analytics').build({ tz: String(req.query.tz || ''), days: req.query.days }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get('/api/automation', (req, res) => res.json(autoDrafts.summary()));
 app.put('/api/automation', (req, res) => {
   try {
@@ -226,15 +249,29 @@ function sendJson(req, res, obj) {
 // --- List cache sync: the page keeps the whole list (contacts + listed posts)
 // in its own cache and asks only for what changed since its last sync.
 // Query: ce/cr = contacts epoch/rev, pe/pr = posts epoch/rev (omit for all).
+// Members get only scraped contacts and no listed posts. Their sync position
+// carries an "m:" epoch, so a browser that switches between member and admin
+// gets a full list for its new view.
 app.get('/api/sync', (req, res) => {
   const q = req.query;
+  if (req.admin) {
+    return sendJson(req, res, {
+      contacts: contacts.changesSince(q.cr, q.ce),
+      posts: posts.changesSince(q.pr, q.pe),
+    });
+  }
+  const ce = String(q.ce || '');
+  const c = contacts.changesSince(q.cr, ce.startsWith('m:') ? ce.slice(2) : undefined);
+  const hidden = c.full ? [] : c.rows.filter((r) => !isScraped(r)).map((r) => r.id);
   sendJson(req, res, {
-    contacts: contacts.changesSince(q.cr, q.ce),
-    posts: posts.changesSince(q.pr, q.pe),
+    contacts: { ...c, epoch: 'm:' + c.epoch, rows: c.rows.filter(isScraped), deleted: c.deleted.concat(hidden) },
+    posts: { epoch: 'm', rev: 0, full: q.pe !== 'm', rows: [], removed: [] },
   });
 });
 
-app.get('/api/contacts', (req, res) => sendJson(req, res, contacts.list()));
+app.get('/api/contacts', (req, res) => sendJson(req, res, req.admin ? contacts.list() : contacts.list().filter(isScraped)));
+// A member may change only the rows it can see (scraped ones).
+const memberMayTouch = (req, row) => req.admin || isScraped(row);
 app.post('/api/contacts/reload', (req, res) => {
   contacts.reload(); // re-read data/contacts.json (pages resync: new epoch)
   res.json({ ok: true, count: contacts.count() });
@@ -247,6 +284,8 @@ const pickFlags = (b = {}) => {
   return f;
 };
 app.patch('/api/contacts/:id', (req, res) => {
+  const target = contacts.list().find((r) => r.id === req.params.id);
+  if (target && !memberMayTouch(req, target)) return res.status(401).json({ ok: false, error: 'Admin sign-in required.', admin: true });
   const row = contacts.setFlags(req.params.id, pickFlags(req.body));
   if (!row) return res.status(404).json({ ok: false, error: 'not found' });
   res.json({ ok: true, row });
@@ -273,6 +312,7 @@ app.post('/api/contacts/manual', (req, res) => {
   const existing = contacts.findByUrl(url);
   const post = posts.find(url);
   if (!existing && !post) return res.status(404).json({ ok: false, error: 'Unknown post.' });
+  if (!req.admin && !isScraped(existing)) return res.status(401).json({ ok: false, error: 'Admin sign-in required.', admin: true });
   const relay = b.relay === undefined ? null : String(b.relay).trim().toLowerCase();
   if (relay !== null && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(relay)) {
     return res.status(400).json({ ok: false, error: 'That is not an email address.' });
@@ -290,6 +330,8 @@ app.post('/api/contacts/manual', (req, res) => {
   res.json({ ok: true, row: out.row });
 });
 app.delete('/api/contacts/:id', (req, res) => {
+  const target = contacts.list().find((r) => r.id === req.params.id);
+  if (target && !memberMayTouch(req, target)) return res.status(401).json({ ok: false, error: 'Admin sign-in required.', admin: true });
   const ok = contacts.remove(req.params.id);
   if (!ok) return res.status(404).json({ ok: false, error: 'not found' });
   res.json({ ok: true });
@@ -312,6 +354,8 @@ app.get('/api/status', (req, res) =>
 // --- Scrape one post now (▶ on a row not scraped yet): a temporary worker
 // that uses only usable proxies. Independent of the main run and the refresh.
 app.post('/api/scrape/post', (req, res) => {
+  if (!req.admin && !isScraped(contacts.findByUrl(String((req.body || {}).url || ''))))
+    return res.status(401).json({ ok: false, error: 'Admin sign-in required.', admin: true });
   const r = postScrape.start((req.body || {}).url, broadcast);
   if (r.error) return res.status(r.status || 400).json({ ok: false, error: r.error });
   res.json({ ok: true });
@@ -460,7 +504,7 @@ app.get('/api/db-format', (req, res) => {
       shape: '{ accounts: { [accountId]: { historyId, checkedAt, error } }, replies: Array<{ id, accountId, logId, contactId, threadId, from, subject, snippet, at, foundAt, seenAt }> }',
     },
     'data/drafts.json': {
-      description: 'Drafts this app created, for the reminder. The app never sends; a draft is "gone" once it leaves the Drafts folder (sent or deleted by you). Gone entries are kept 30 days.',
+      description: 'Drafts this app created, for the reminder. The app never sends; a draft is "gone" once it leaves the Drafts folder (sent or deleted by you). Gone entries (left Drafts: counted as sent) are kept a year (Analytics counts drafts per day from them).',
       shape: 'Array<DraftEntry>',
       record: {
         id: 'uuid', accountId: 'uuid', provider: '"google" | "microsoft"', to: 'string', subject: 'string', templateId: 'uuid | null',
@@ -499,13 +543,14 @@ app.get('/api/db-format', (req, res) => {
         relay: 'string | null (…@job.craigslist.org)',
         captchaBlocked: 'boolean',
         note: 'string',
-        sent: 'boolean (manual)',
+        sent: 'boolean (manual, or set when its automatic draft was sent)',
+        sentAt: 'ISOString, when it was marked sent (Analytics)',
         scrapedAt: 'ISOString (first time this listing was stored)',
         postedAt: 'ISOString | null (when the listing was posted on Craigslist)',
         refreshStatus: '"fresh" | "unverified" | "expired" | absent (not checked yet)',
         checkedAt: 'ISOString | absent (last check, any outcome)',
         relayCheckedAt: 'ISOString | absent (last time the relay was read from the live page)',
-        autoDraft: '{ at, accountId, account, templateId, to, draftId, logId } once an automatic draft was made | { fails, error, at, to } after failed tries | absent',
+        autoDraft: '{ at, accountId, account, templateId, to, draftId, logId, status?: "sent", sentAt? } once an automatic draft was made (status "sent" once it left Drafts) | { fails, error, at, to } after failed tries | absent',
         relayChangedAt: 'ISOString | absent (last time the relay was found changed)',
         relayChanges: 'number | absent (times the relay was found changed)',
         aliveCheckedAt: 'ISOString | absent (last HTTP sweep that found the listing alive)',

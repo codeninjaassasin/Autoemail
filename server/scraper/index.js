@@ -64,9 +64,36 @@ function stop() {
   if (activeBrowser) activeBrowser.close().catch(() => {});
 }
 
+// --- Success rate: the last RECENT_TRIES post visits of this run ---------------
+// Each try is 'relay', 'contact' (phone or email only), 'gated' (captcha),
+// 'net' (the proxy failed), 'noreply' (no reply button) or 'none' (page loaded,
+// nothing caught). The page flags the rate when it falls below LOW_RATE.
+const RECENT_TRIES = 200;
+const LOW_RATE = 0.05;
+const LOW_MIN_TRIES = 40;
+let recentTries = [];
+function recordTry(kind) {
+  recentTries.push(kind);
+  if (recentTries.length > RECENT_TRIES) recentTries.shift();
+}
+function accuracy() {
+  const n = recentTries.length;
+  const count = (k) => recentTries.filter((x) => x === k).length;
+  const relay = count('relay');
+  const contact = count('contact');
+  const gated = count('gated');
+  const net = count('net');
+  const rate = n ? (relay + contact) / n : null;
+  const low = n >= LOW_MIN_TRIES && rate < LOW_RATE;
+  // The main cause when it is low.
+  const cause = !low ? null : net >= gated && net >= n / 3 ? 'proxies' : gated >= n / 3 ? 'captcha' : 'none';
+  return { tries: n, relay, contact, gated, net, noReply: count('noreply'), rate, low, cause, lowBelow: LOW_RATE, window: RECENT_TRIES };
+}
+
 function snapshot() {
   return {
     ...state,
+    accuracy: accuracy(),
     uptimeMs: state.startedAt ? Date.now() - state.startedAt : 0,
     proxies: proxies.stats(),
     contacts: contacts.count(),
@@ -144,14 +171,57 @@ async function proxyProducer(ctx, myToken) {
   }
 }
 
-// --- Post queue: new posts first ---------------------------------------------
+// --- Post queue: newest posts first -------------------------------------------
 // Two tiers. `newQueue` holds posts not in the contact list yet; `queue` holds
 // posts already stored (re-visited only to update their relay). Workers always
-// take a new post when one is waiting. A post first listed after the run's
-// first scan is the newest, so it goes to the FRONT of newQueue; a retried post
-// goes to the back of its own tier.
-function nextItem(ctx) {
-  return ctx.newQueue.shift() || ctx.queue.shift() || null;
+// take a new post when one is waiting, and of those the most recently posted
+// one (posted date, else when the scrape first saw it listed). A failed try
+// (usually the proxy's fault) does not send a post to the back: it only counts
+// as RETRY_PENALTY_MS older, so a fresh post is retried at once while one that
+// keeps failing slowly gives way to newer posts.
+const RETRY_PENALTY_MS = 10 * 60 * 1000;
+// Proven proxies get the newest posts: a worker on an unproven proxy (almost
+// all fail) skips the RESERVE_PER_PROVEN newest posts per worker that holds a
+// proven one, and tests its proxy on the next ones (or a stored re-visit).
+const RESERVE_PER_PROVEN = 2;
+const RESERVE_MAX = 12;
+function isProven(server) {
+  const p = server ? proxies.find(server) : null;
+  return !!(p && p.live && (p.consecutiveFails || 0) < 3);
+}
+function rankOf(item) {
+  const p = posts.find(item.url);
+  const t = Date.parse((p && (p.postedAt || p.firstSeenAt)) || '') || item.queuedAt || 0;
+  return t - (item.attempts || 0) * RETRY_PENALTY_MS;
+}
+function nextItem(ctx, me) {
+  const q = ctx.newQueue;
+  if (!q.length) return ctx.queue.shift() || null;
+  let skip = 0;
+  if (ctx.useProxies && me && !isProven(ctx.holders.get(me))) {
+    let proven = 0;
+    for (const [w, server] of ctx.holders) if (w !== me && isProven(server)) proven++;
+    skip = Math.min(RESERVE_MAX, proven * RESERVE_PER_PROVEN);
+  }
+  if (!skip) {
+    let best = 0;
+    let bestRank = -Infinity;
+    for (let i = 0; i < q.length; i++) {
+      const r = rankOf(q[i]);
+      if (r > bestRank) {
+        bestRank = r;
+        best = i;
+      }
+    }
+    return q.splice(best, 1)[0];
+  }
+  if (skip >= q.length) {
+    // Every waiting new post is kept for the proven proxies.
+    if (ctx.queue.length) return ctx.queue.shift();
+    skip = q.length - 1;
+  }
+  const order = q.map((it, i) => [rankOf(it), i]).sort((a, b) => b[0] - a[0]);
+  return q.splice(order[skip][1], 1)[0];
 }
 function requeue(ctx, item) {
   const row = item.isNew ? contacts.findByUrl(item.url) : null;
@@ -170,12 +240,14 @@ async function runWorker(ctx, myToken) {
   state.activeWorkers++;
   let proxy = null;
   let context = null;
+  const me = {}; // this worker, in ctx.holders while it holds a proxy
 
   const dropProxy = async (relaxIt) => {
     if (context) await context.close().catch(() => {});
     context = null;
     if (proxy && relaxIt) ctx.broker.relaxProxy(proxy);
     proxy = null;
+    ctx.holders.delete(me);
   };
 
   try {
@@ -193,9 +265,10 @@ async function runWorker(ctx, myToken) {
           proxy = null;
           continue;
         }
+        ctx.holders.set(me, proxy);
       }
 
-      const item = nextItem(ctx);
+      const item = nextItem(ctx, me);
       if (!item) {
         if (ctx.inFlight === 0 && !ctx.collecting) break;
         await sleep(200);
@@ -262,15 +335,20 @@ async function runWorker(ctx, myToken) {
           }
         }
 
+        recordTry(row.relay ? 'relay' : hasContact(row) ? 'contact' : gated ? 'gated' : netErr ? 'net' : row.noReply ? 'noreply' : 'none');
+
         // --- post outcome: done on relay/gone/duplicate; else retry (another
         // proxy/worker), park after maxProxiesPerPost distinct proxies ---
         const gone = /http (404|410|401)/i.test(row.note || '');
+        // The page loaded cleanly but has no reply button: there is no relay to
+        // catch, so another proxy would only see the same page.
+        const noReply = !!row.noReply && proxyWorked && !!row.title;
         const triedCount = item.tried ? item.tried.size : item.attempts;
-        if (row.relay || gone || item.terminal) {
+        if (row.relay || gone || noReply || item.terminal) {
           ctx.pending.delete(item.url); // finished — a later cycle may queue it again
-          if (gone || item.terminal === 'duplicate') {
+          if (gone || noReply || item.terminal === 'duplicate') {
             state.dropped++;
-            emit({ type: 'dropped', url: item.url, reason: gone ? 'gone' : item.terminal });
+            emit({ type: 'dropped', url: item.url, reason: gone ? 'gone' : noReply ? 'no reply button' : item.terminal });
           }
         } else if (triedCount >= ctx.maxProxiesPerPost) {
           ctx.pending.delete(item.url);
@@ -290,6 +368,7 @@ async function runWorker(ctx, myToken) {
     }
   } finally {
     if (context) await context.close().catch(() => {});
+    ctx.holders.delete(me);
     state.activeWorkers--;
   }
 }
@@ -318,6 +397,7 @@ async function runForever(params, onEvent = () => {}) {
   const collectDelayMs = Math.max(0, Math.min(Number(params.collectDelayMs) || 400, 10000));
   const maxProxiesPerPost = Math.max(10, Math.min(Number(params.maxProxiesPerPost) || 100, 2000));
 
+  recentTries = [];
   Object.assign(state, {
     running: true,
     startedAt: Date.now(),
@@ -362,13 +442,13 @@ async function runForever(params, onEvent = () => {}) {
     const ctx = {
       queue, // posts already stored (relay re-visits)
       newQueue: [], // posts not stored yet — always served first
-      everListed: new Set(), // every url seen in any scan this run
       inFlight: 0,
       collecting: true,
       // URLs currently queued or in flight. In loop mode a re-scan must not
       // re-add a post that's still waiting from an earlier cycle (that piled
       // up 100k+ duplicates and the workers could never catch up).
       pending: new Set(),
+      holders: new Map(), // worker -> proxy it holds (proven ones get the newest posts)
       browser,
       useProxies,
       replyWaitMs,
@@ -416,26 +496,20 @@ async function runForever(params, onEvent = () => {}) {
               let addedNew = 0;
               // Posts already marked sent are done: never visit them again.
               const stored = new Map(contacts.list().map((r) => [r.url, r]));
-              const justListed = []; // first listed since the run's first scan: newest
               for (const url of urls) {
                 const row = stored.get(url);
                 if (seen.has(url) || ctx.pending.has(url) || (row && row.sent)) continue;
                 seen.add(url);
                 ctx.pending.add(url);
-                const firstSighting = !ctx.everListed.has(url);
-                ctx.everListed.add(url);
                 // A row marked sent/red before its first scrape is still a new post.
                 const isNew = !row || !!row.unscraped;
-                const item = { url, area, category, attempts: 0, isNew };
+                const item = { url, area, category, attempts: 0, isNew, queuedAt: Date.now() };
                 if (isNew) {
                   addedNew++;
-                  // The search page lists newest first, so keep page order.
-                  if (firstSighting && state.cycles > 1) justListed.push(item);
-                  else ctx.newQueue.push(item);
+                  ctx.newQueue.push(item); // taken newest posted first (nextItem)
                 } else queue.push(item);
                 added++;
               }
-              if (justListed.length) ctx.newQueue.unshift(...justListed);
               state.queueTotal += added;
               state.newThisCycle += added;
               state.newPostsFound += addedNew;
