@@ -1809,11 +1809,11 @@ function viewRows() {
   return viewMemo.list;
 }
 
-// --- 💩 Scrape one post now: a temporary server worker using usable proxies ---
+// --- ▶ Scrape one post now: a temporary server worker using usable proxies ---
 const postJobs = new Map(); // url -> running job (from /api/status, all devices)
 const myPostJobs = new Set(); // urls started on this device: toast their result
 let postJobsKey = '';
-const PLAY_ICON = '<span class="poo" aria-hidden="true">💩</span>';
+const PLAY_ICON = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M5 3.2v9.6L12.6 8z" fill="currentColor"/></svg>';
 const STOP_ICON = '<svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2" fill="currentColor"/></svg>';
 function playButton(url, job) {
   const label = job ? 'Stop scraping this post' : 'Scrape this post now (usable proxies only)';
@@ -2056,8 +2056,8 @@ function handleEvent(e) {
     };
     addLog(`refresh: ${words[e.outcome]}: ${e.url}`);
   } else if (e.type === 'post-scrape') {
-    if (e.phase === 'start') addLog(`💩 scraping one post: ${e.url}`);
-    else addLog(`💩 ${e.outcome}${e.tried ? ` (${e.tried} proxies)` : ''}: ${e.message} ${e.url}`);
+    if (e.phase === 'start') addLog(`▶ scraping one post: ${e.url}`);
+    else addLog(`▶ ${e.outcome}${e.tried ? ` (${e.tried} proxies)` : ''}: ${e.message} ${e.url}`);
   } else if (e.type !== 'collected') {
     addLog(JSON.stringify(e));
   }
