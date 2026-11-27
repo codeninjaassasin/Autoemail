@@ -1553,6 +1553,7 @@ function paintRows() {
   renderScope();
   const shown = filtered.slice(0, renderLimit);
   const more = filtered.length - shown.length;
+  const editorFocused = !!(manualEdit && document.activeElement && document.activeElement.closest('.manual-edit'));
   tbody.innerHTML =
     shown.map(rowHtml).join('') +
     (more > 0
@@ -1560,6 +1561,7 @@ function paintRows() {
       : '');
   const sentinel = tbody.querySelector('.more-row');
   if (sentinel) moreObserver.observe(sentinel);
+  if (manualEdit) remountManualEditor(editorFocused);
   document.getElementById('rowCount').textContent =
     filtered.length === all.length
       ? `${all.length} posts · ${rows.length} scraped`
@@ -2039,40 +2041,63 @@ async function togglePostScrape(btn) {
 const PENCIL_ICON =
   '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M11.2 2.3l2.5 2.5-7.9 7.9-3.1.6.6-3.1z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
 function pencilCell(r, field) {
-  if (r.sent) return `<span class="posted-none">${r.unscraped ? 'Not scraped' : '–'}</span>`;
   const label = field === 'relay' ? 'relay email' : 'phone number';
   return `<span class="manual-slot"><span class="manual-empty">${r.unscraped ? 'Not scraped' : '–'}</span><button type="button" class="pencil" data-url="${esc(r.url)}" data-field="${field}" title="Fill ${label} by hand" aria-label="Fill ${label} by hand">${PENCIL_ICON}</button></span>`;
 }
+// The open hand-fill editor lives here, not in the DOM: the table is rebuilt
+// on every sync (scrapes land every few seconds), and each paint re-mounts it
+// with what was typed so far.
+let manualEdit = null; // { url, field, value, busy }
 function openManualEditor(btn) {
+  manualEdit = { url: btn.dataset.url, field: btn.dataset.field, value: '', busy: false };
+  mountManualEditor(btn, true);
+}
+function remountManualEditor(focus) {
+  if (!manualEdit) return;
+  const btn = tbody.querySelector(`.pencil[data-url="${CSS.escape(manualEdit.url)}"][data-field="${manualEdit.field}"]`);
+  if (btn) mountManualEditor(btn, focus);
+  else if (!manualEdit.busy) manualEdit = null; // the row left the list, or got filled meanwhile
+}
+function mountManualEditor(btn, focus) {
+  const ed = manualEdit;
   const td = btn.closest('td');
-  const field = btn.dataset.field;
-  const url = btn.dataset.url;
-  td.innerHTML = `<span class="manual-edit"><input type="${field === 'relay' ? 'email' : 'tel'}" class="manual-input" placeholder="${field === 'relay' ? 'name@example.com' : '(555) 123-4567'}" aria-label="${field === 'relay' ? 'Relay email' : 'Phone number'}"/><button type="button" class="manual-save" title="Save">✓</button><button type="button" class="manual-cancel" title="Cancel">✕</button></span>`;
+  const isRelay = ed.field === 'relay';
+  td.innerHTML = `<span class="manual-edit"><input type="${isRelay ? 'email' : 'tel'}" class="manual-input" placeholder="${isRelay ? 'name@example.com' : '(555) 123-4567'}" aria-label="${isRelay ? 'Relay email' : 'Phone number'}"/><button type="button" class="manual-save" title="Save">✓</button><button type="button" class="manual-cancel" title="Cancel">✕</button></span>`;
   const input = td.querySelector('input');
-  input.focus();
-  const cancel = () => renderRows();
+  input.value = ed.value;
+  input.disabled = ed.busy;
+  if (focus) {
+    input.focus();
+    input.setSelectionRange?.(input.value.length, input.value.length);
+  }
+  input.addEventListener('input', () => { ed.value = input.value; });
+  const cancel = () => {
+    if (manualEdit === ed) manualEdit = null;
+    renderRows();
+  };
+  const current = () => tbody.querySelector('.manual-edit input');
   const save = async () => {
-    const value = input.value.trim();
+    const value = ed.value.trim();
     if (!value) return cancel();
+    if (ed.busy) return;
+    ed.busy = true;
     input.disabled = true;
     try {
       const res = await fetch('/api/contacts/manual', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, [field]: value }),
+        body: JSON.stringify({ url: ed.url, [ed.field]: value }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        showToast({ kicker: 'Not saved', title: value, body: data.error || 'Could not save.', tone: 'bad' });
-        input.disabled = false;
-        input.focus();
-        return;
-      }
-      showToast({ kicker: 'Saved', title: value, body: data.row.title || url });
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save.');
+      if (manualEdit === ed) manualEdit = null;
+      showToast({ kicker: 'Saved', title: value, body: data.row.title || ed.url });
       applyContactRows([data.row]);
     } catch (err) {
+      ed.busy = false;
       showToast({ kicker: 'Not saved', title: value, body: err.message, tone: 'bad' });
-      input.disabled = false;
+      const el = manualEdit === ed && current();
+      if (el) { el.disabled = false; el.focus(); }
     }
   };
   td.querySelector('.manual-save').addEventListener('click', save);

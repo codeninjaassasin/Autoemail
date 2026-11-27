@@ -245,11 +245,10 @@ function addFromPost(url, post = {}, extra = {}) {
 
 // Manual entry from the list's pencil icon: a relay email and/or one phone.
 // Creates the contact when the post hasn't been scraped yet (`post` gives its
-// title/area/category). Returns { row } or { error }.
+// title/area/category). Works on sent rows too. Returns { row } or { error }.
 function setManual(url, { relay, phone }, post = {}) {
   const rows = load();
   let row = byUrl.get(url) || null;
-  if (row && row.sent) return { error: 'This contact is marked sent.' };
   if (phone && rows.some((r) => r !== row && (r.phones || []).includes(phone))) {
     return { error: 'That phone number is already on another contact.' };
   }
