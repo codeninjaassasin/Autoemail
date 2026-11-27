@@ -17,9 +17,10 @@
       /* Hallmark · Console tokens from /tokens.css · login card */
       body { min-height: 100dvh; display: grid; place-items: center; padding: var(--space-md); font-size: var(--text-sm); }
       .card { width: 100%; max-width: 360px; background: var(--color-paper-2); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-lg); }
-      .brand { display: flex; align-items: center; gap: var(--space-xs); margin-bottom: var(--space-lg); }
-      .mark { width: 20px; height: 20px; border-radius: 5px; }
-      .wordmark { font-weight: 500; font-size: var(--text-md); letter-spacing: -0.02em; }
+      .brand { display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-lg); }
+      .mark-link { display: inline-flex; flex: none; border-radius: 9px; }
+      .mark-link:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 4px; }
+      .mark { width: 36px; height: 36px; border-radius: 9px; }
       .tag { color: var(--color-muted); font-size: var(--text-xs); }
       h1 { font-size: var(--text-xl); margin: 0 0 var(--space-2xs); }
       p.sub { margin: 0 0 var(--space-lg); color: var(--color-muted); }
@@ -39,7 +40,7 @@
   </head>
   <body>
     <form class="card" id="f" autocomplete="on">
-      <div class="brand"><img class="mark" src="/favicon.svg" width="20" height="20" alt="" /><span class="wordmark">autoemail</span><span class="tag">{{TAG}}</span></div>
+      <div class="brand"><a class="mark-link" href="/" aria-label="autoemail, home"><img class="mark" src="/favicon.svg" width="36" height="36" alt="" /></a><span class="tag">{{TAG}}</span></div>
       <h1>{{HEADING}}</h1>
       <p class="sub">{{SUB}}</p>
       <label for="pw">Password</label>
